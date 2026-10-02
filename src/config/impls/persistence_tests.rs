@@ -910,3 +910,102 @@ fn separate_processes_racing_to_initialize_an_empty_profile_have_one_winner() {
 fn separate_process_save_rejects_a_newer_import_and_succeeds_after_reload() {
     subprocess_conflict(false);
 }
+
+#[test]
+fn failed_credential_compensation_blocks_every_writer_until_a_fresh_load() {
+    let _serial = KEYRING_TESTS.lock().unwrap();
+    fake_keyring::install();
+    for editor_save in [false, true] {
+        fake_keyring::clear();
+        let mut store = keyring_store();
+        let original_cache = store.cache.clone();
+        let id = store.cache.sessions[0].id.clone();
+        let disk_before = raw_disk(&store);
+        let saved_before = baseline(&store);
+        let connection = reject_revision(&store, "ABORT");
+        // The attempted edit reaches the fake provider; its compensating
+        // write fails after SQLite rejects the commit's revision update.
+        fake_keyring::fail_writes_after(1);
+        let mut edited = store.cache.sessions[0].clone();
+        edited.password = Secret::new("fixture incompletely rolled back password");
+        let error = if editor_save {
+            store.upsert_and_save(edited).unwrap_err()
+        } else {
+            store.upsert(edited);
+            store.save().unwrap_err()
+        };
+        assert!(error.is::<SessionCredentialRollbackFailed>(), "{error:#}");
+        assert!(store.saved_state.lock().unwrap().credentials_uncertain);
+        assert_eq!(baseline(&store), saved_before);
+        assert_eq!(raw_disk(&store), disk_before);
+        assert_eq!(
+            fake_keyring::get(ConfigStore::KEYRING_SERVICE, &id).as_deref(),
+            Some("fixture incompletely rolled back password")
+        );
+        let retained_error = store.persistence_error();
+        assert!(retained_error
+            .as_deref()
+            .unwrap()
+            .contains("could not be restored"));
+        if editor_save {
+            assert_eq!(
+                cache_value(&store),
+                serde_json::to_value(&original_cache).unwrap()
+            );
+        } else {
+            assert_eq!(
+                store.cache.sessions[0].password.as_str(),
+                "fixture incompletely rolled back password"
+            );
+        }
+
+        // Restore the provider and remove the SQL fault. Every rejection
+        // below must now come from the shared uncertain-credential state.
+        fake_keyring::fail_writes_after(usize::MAX - fake_keyring::write_count());
+        connection
+            .execute_batch("DROP TRIGGER fixture_reject_revision")
+            .unwrap();
+        let writes_before = fake_keyring::write_count();
+        for kind in ["noop", "noop", "settings", "history", "import"] {
+            // An editor save already restored its cache. A generic caller
+            // can also discard its pending edit, but that must not clear the
+            // persistence warning or make an unchanged save count as success.
+            store.cache = original_cache.clone();
+            if kind != "import" {
+                mutate(&mut store, kind);
+            }
+            let pending = cache_value(&store);
+            let error = if kind == "import" {
+                store.import_json(&import_payload()).unwrap_err()
+            } else {
+                store.save().unwrap_err()
+            };
+            assert!(
+                error.is::<SessionCredentialRollbackFailed>(),
+                "{kind}: {error:#}"
+            );
+            assert!(store.saved_state.lock().unwrap().credentials_uncertain);
+            assert_eq!(store.persistence_error(), retained_error, "{kind}");
+            assert_eq!(cache_value(&store), pending);
+            assert_eq!(baseline(&store), saved_before);
+            assert_eq!(raw_disk(&store), disk_before);
+            assert_eq!(fake_keyring::write_count(), writes_before, "{kind}");
+        }
+        drop(connection);
+
+        let mut reloaded = second_store(&store);
+        assert!(!reloaded.saved_state.lock().unwrap().credentials_uncertain);
+        assert!(reloaded.persistence_error().is_none());
+        reloaded.save().unwrap();
+        mutate(&mut reloaded, "settings");
+        reloaded.save().unwrap();
+        mutate(&mut reloaded, "history");
+        reloaded.save().unwrap();
+        assert_eq!(reloaded.import_json(&import_payload()).unwrap(), (1, 0));
+        assert!(reloaded.persistence_error().is_none());
+        // Loading another editor cannot silently unpoison the old one.
+        assert!(store.saved_state.lock().unwrap().credentials_uncertain);
+        assert_eq!(store.persistence_error(), retained_error);
+        cleanup(&store);
+    }
+}
