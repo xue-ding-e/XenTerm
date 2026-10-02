@@ -946,7 +946,7 @@ fn failed_credential_compensation_blocks_every_writer_until_a_fresh_load() {
         assert!(retained_error
             .as_deref()
             .unwrap()
-            .contains("could not be restored"));
+            .contains("credential recovery"));
         if editor_save {
             assert_eq!(
                 cache_value(&store),

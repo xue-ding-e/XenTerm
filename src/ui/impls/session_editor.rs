@@ -429,8 +429,8 @@ impl SessionEditor {
 fn save_failure_message(error: &anyhow::Error) -> &'static str {
     if error.is::<crate::config::SessionCredentialRollbackFailed>() {
         return crate::i18n::t(
-            "保存失败，且无法确认系统钥匙串中的原密码已恢复。输入已保留；钥匙串中的密码可能已改变，请检查后再重试。",
-            "Could not save or verify that the original keyring password was restored. Your entries are kept, but the keyring password may have changed; check it before retrying.",
+            "无法确认保存结果或系统钥匙串中的原密码已恢复。输入已保留；请先保留修改并重新打开 XenTerm 尝试恢复，检查凭据后再重试。",
+            "Could not confirm the save outcome or verify that the original keyring password was restored. Your entries are kept; copy pending edits, reopen XenTerm to attempt recovery, and check credentials before retrying.",
         );
     }
     if error.is::<crate::config::ConfigurationChanged>() {
@@ -1611,8 +1611,8 @@ mod tests {
         assert_eq!(
             message,
             crate::i18n::t(
-                "保存失败，且无法确认系统钥匙串中的原密码已恢复。输入已保留；钥匙串中的密码可能已改变，请检查后再重试。",
-                "Could not save or verify that the original keyring password was restored. Your entries are kept, but the keyring password may have changed; check it before retrying.",
+                "无法确认保存结果或系统钥匙串中的原密码已恢复。输入已保留；请先保留修改并重新打开 XenTerm 尝试恢复，检查凭据后再重试。",
+                "Could not confirm the save outcome or verify that the original keyring password was restored. Your entries are kept; copy pending edits, reopen XenTerm to attempt recovery, and check credentials before retrying.",
             )
         );
         for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_FULL] {
