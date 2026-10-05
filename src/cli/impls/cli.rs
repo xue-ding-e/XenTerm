@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use std::path::Path;
 
 use super::structs::CliCommand;
 
@@ -49,22 +50,50 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                 .get(3)
                 .filter(|arg| !arg.starts_with("--"))
                 .ok_or_else(|| {
-                    anyhow!("usage: xenterm cli import <export.json> [--dry-run] [--json]")
+                    anyhow!("usage: xenterm cli import <export.json> [--dry-run] [--preserve-ids] [--json]")
                 })?;
             for arg in &args[4..] {
-                if !matches!(arg.as_str(), "--dry-run" | "--json") {
-                    return Err(anyhow!(
-                        "unknown import option (expected --dry-run or --json)"
-                    ));
+                if !matches!(arg.as_str(), "--dry-run" | "--preserve-ids" | "--json") {
+                    return Err(anyhow!("unknown import option"));
                 }
             }
-            runtime.block_on(call_cli(
-                "import_sessions",
-                &json!({
-                    "local_path": path,
-                    "dry_run": args.iter().any(|arg| arg == "--dry-run")
-                }),
-            ))?
+            let dry_run = args[4..].iter().any(|arg| arg == "--dry-run");
+            if args[4..].iter().any(|arg| arg == "--preserve-ids") {
+                require_independent_migration_profile(crate::config::has_explicit_data_dir())?;
+                let mut store = crate::config::ConfigStore::load()?;
+                let summary = store.import_from_preserving_ids(Path::new(path), dry_run)?;
+                let mut value = serde_json::to_value(summary)?;
+                value["dry_run"] = json!(dry_run);
+                value
+            } else {
+                runtime.block_on(call_cli(
+                    "import_sessions",
+                    &json!({
+                        "local_path": path, "dry_run": dry_run
+                    }),
+                ))?
+            }
+        }
+        CliCommand::SyncNative => {
+            require_independent_migration_profile(crate::config::has_explicit_data_dir())?;
+            let path = args
+                .get(3)
+                .filter(|arg| !arg.starts_with("--"))
+                .ok_or_else(|| {
+                    anyhow!("usage: xenterm cli sync-native <sessions.json> [--dry-run] [--json]")
+                })?;
+            if args[4..]
+                .iter()
+                .any(|arg| !matches!(arg.as_str(), "--json" | "--dry-run"))
+            {
+                return Err(anyhow!(
+                    "unknown sync-native option (expected --dry-run or --json)"
+                ));
+            }
+            let mut store = crate::config::ConfigStore::load()?;
+            let dry_run = args[4..].iter().any(|arg| arg == "--dry-run");
+            let (updated, added) = store.sync_native_snapshot_preview(Path::new(path), dry_run)?;
+            json!({ "updated": updated, "added": added, "dry_run": dry_run })
         }
         CliCommand::Sessions => {
             let group = option_value(args, "--group")?;
@@ -88,7 +117,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             if remote_command.trim().is_empty() {
                 return Err(anyhow!("remote command must not be empty"));
             }
-            let timeout = option_value(args, "--timeout")?
+            let timeout = option_value(&args[..delimiter], "--timeout")?
                 .map(|value| value.parse::<u64>())
                 .transpose()
                 .context("--timeout must be a positive integer")?
@@ -170,11 +199,48 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         }
     };
 
-    if args.iter().any(|arg| arg == "--json") {
+    let options = local_options(command, args);
+    if options.iter().any(|arg| arg == "--json") {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print_human(command, &value);
     }
+    if command == CliCommand::Exec {
+        ensure_remote_success(&value)?;
+    }
+    Ok(())
+}
+
+/// Stable identifiers must stay within an independent local-key profile.
+fn require_independent_migration_profile(explicit: bool) -> Result<()> {
+    anyhow::ensure!(explicit,
+        "stable-ID and native snapshot migrations require a separate --data-dir profile with local credential storage; export from the original application and initialize that independent profile with a portable import");
+    Ok(())
+}
+
+/// A remote program's flags after `--` must never change local CLI behavior.
+fn local_options(command: CliCommand, args: &[String]) -> &[String] {
+    if command == CliCommand::Exec {
+        &args[..args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(args.len())]
+    } else {
+        args
+    }
+}
+
+/// Preserve the result output for scripts, but make failed remote commands fail
+/// locally too. A missing exit status cannot be treated as confirmed success.
+fn ensure_remote_success(value: &Value) -> Result<()> {
+    anyhow::ensure!(
+        value.get("timed_out").and_then(Value::as_bool) != Some(true),
+        "remote command timed out"
+    );
+    anyhow::ensure!(
+        value.get("exit_code").and_then(Value::as_i64) == Some(0),
+        "remote command failed"
+    );
     Ok(())
 }
 
@@ -215,6 +281,21 @@ fn print_human(command: CliCommand, value: &Value) {
                 }
             }
         }
+        CliCommand::SyncNative => println!(
+            "{} {} sessions, {} {} sessions",
+            if value.get("dry_run").and_then(Value::as_bool) == Some(true) {
+                "Would update"
+            } else {
+                "Updated"
+            },
+            value.get("updated").and_then(Value::as_u64).unwrap_or(0),
+            if value.get("dry_run").and_then(Value::as_bool) == Some(true) {
+                "would add"
+            } else {
+                "added"
+            },
+            value.get("added").and_then(Value::as_u64).unwrap_or(0)
+        ),
         CliCommand::Sessions => {
             if let Some(sessions) = value.get("sessions").and_then(Value::as_array) {
                 for session in sessions {
@@ -281,7 +362,8 @@ fn print_help() {
         "XenTerm CLI\n\n\
          Usage:\n\
            xenterm cli export <new-file.json> --include-credentials [--json]\n\
-           xenterm cli import <export.json> [--dry-run] [--json]\n\
+           xenterm cli import <export.json> [--dry-run] [--preserve-ids] [--json]\n\
+           xenterm cli sync-native <sessions.json> [--dry-run] [--json]\n\
            xenterm cli sessions [--group <name>] [--json]\n\
            xenterm cli session <session-id> [--json]\n\
            xenterm cli exec <session-id> [--timeout <seconds>] [--json] -- <command>\n\
@@ -307,5 +389,52 @@ mod tests {
         ];
         assert_eq!(option_value(&args, "--group").unwrap(), Some("prod"));
         assert_eq!(option_value(&args, "--json").unwrap(), None);
+        assert_eq!(
+            CliCommand::parse(Some("sync-native")),
+            Some(CliCommand::SyncNative)
+        );
+    }
+
+    #[test]
+    fn remote_options_are_not_local_options() {
+        let args = [
+            "xenterm",
+            "cli",
+            "exec",
+            "fixture",
+            "--",
+            "command",
+            "--json",
+            "--timeout",
+            "not-a-number",
+        ]
+        .map(String::from);
+        let local = local_options(CliCommand::Exec, &args);
+        assert_eq!(local.len(), 4);
+        assert!(!local.iter().any(|arg| arg == "--json"));
+        assert_eq!(option_value(local, "--timeout").unwrap(), None);
+        assert_eq!(local_options(CliCommand::Sessions, &args), args);
+    }
+
+    #[test]
+    fn only_confirmed_zero_remote_exit_is_success() {
+        assert!(ensure_remote_success(&json!({"exit_code": 0, "timed_out": false})).is_ok());
+        for value in [
+            json!({"exit_code": 17}),
+            json!({"exit_code": null}),
+            json!({}),
+            json!({"exit_code": 0, "timed_out": true}),
+        ] {
+            assert!(ensure_remote_success(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn migration_modes_require_explicit_independent_profiles() {
+        assert!(require_independent_migration_profile(true).is_ok());
+        assert!(require_independent_migration_profile(false)
+            .unwrap_err()
+            .to_string()
+            .contains("--data-dir"));
     }
 }
