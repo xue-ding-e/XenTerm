@@ -1,5 +1,6 @@
 """Stable-ID import and additive native-sync CLI regression, synthetic data only."""
 import argparse
+import contextlib
 import json
 from pathlib import Path
 import sqlite3
@@ -10,7 +11,7 @@ from ssh_jump_chain_e2e import Fixture, PASSWORD, PASSPHRASE
 
 
 def snapshot(profile):
-    with sqlite3.connect(profile / "sessions.db") as db:
+    with contextlib.closing(sqlite3.connect(profile / "sessions.db")) as db, db:
         return {name: db.execute(query).fetchall() for name, query in (
             ("meta", "SELECT key,value FROM meta ORDER BY key"),
             ("sessions", "SELECT ordinal,id,data FROM sessions ORDER BY ordinal,id"),
@@ -80,11 +81,11 @@ def main():
             assert cli(destination, "sync-native", str(native), "--dry-run", "--json") == dict(updated=1, added=1, dry_run=True)
             assert snapshot(destination) == before
             # A second-row failure must roll back the first update as well.
-            with sqlite3.connect(destination / "sessions.db") as db:
+            with contextlib.closing(sqlite3.connect(destination / "sessions.db")) as db, db:
                 db.executescript("CREATE TRIGGER fail_new BEFORE INSERT ON sessions WHEN NEW.id='native-added' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;")
             cli(destination, "sync-native", str(native), "--json", ok=False)
             assert snapshot(destination) == before
-            with sqlite3.connect(destination / "sessions.db") as db:
+            with contextlib.closing(sqlite3.connect(destination / "sessions.db")) as db, db:
                 db.executescript("DROP TRIGGER fail_new;")
             assert cli(destination, "sync-native", str(native), "--json") == dict(updated=1, added=1, dry_run=False)
             after = snapshot(destination)
