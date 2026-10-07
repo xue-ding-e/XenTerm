@@ -28,28 +28,40 @@
       "theme": "Light",
       "snapshots": [
         {
-          "file": "recovered-pure-focus-01-cold-ctrl-k.png",
-          "sha256": "465406aaf3b4eccb8d6514f6c71827574cfbfb160cd186c9db706574887d0d84"
+          "file": "recovered-pure-focus-01-cold-ctrl-k.jpg",
+          "sha256": "465406aaf3b4eccb8d6514f6c71827574cfbfb160cd186c9db706574887d0d84",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-focus-02-empty-palette.png",
-          "sha256": "5c8e88b028e191e85cd3d606ec63427f14659d5d7b948a915d1fe6635f80edd6"
+          "file": "recovered-pure-focus-02-empty-palette.jpg",
+          "sha256": "5c8e88b028e191e85cd3d606ec63427f14659d5d7b948a915d1fe6635f80edd6",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-focus-03-input-not-stolen.png",
-          "sha256": "7bc16a0013b01349cc7b23cde49b00c4bd88500843b23c5336cb7288d03b3e25"
+          "file": "recovered-pure-focus-03-input-not-stolen.jpg",
+          "sha256": "7bc16a0013b01349cc7b23cde49b00c4bd88500843b23c5336cb7288d03b3e25",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-focus-04-settings-return.png",
-          "sha256": "40b79bf61149095dc18106cc540a9fa142d6453a692f210cb895c032c48846c9"
+          "file": "recovered-pure-focus-04-settings-return.jpg",
+          "sha256": "40b79bf61149095dc18106cc540a9fa142d6453a692f210cb895c032c48846c9",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-focus-05-return-palette.png",
-          "sha256": "010ec9d803d7b92ca55c7c04632eb1e2221e21b6b9bedb8f561cd092ff9296e3"
+          "file": "recovered-pure-focus-05-return-palette.jpg",
+          "sha256": "010ec9d803d7b92ca55c7c04632eb1e2221e21b6b9bedb8f561cd092ff9296e3",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-focus-06-last-tab-reopen.png",
-          "sha256": "ac5be609117c69af7a9a5b40566109bbd927900290ac6ae5902d73913283bbde"
+          "file": "recovered-pure-focus-06-last-tab-reopen.jpg",
+          "sha256": "ac5be609117c69af7a9a5b40566109bbd927900290ac6ae5902d73913283bbde",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         }
       ]
     },
@@ -79,28 +91,40 @@
       "theme": "Light",
       "snapshots": [
         {
-          "file": "recovered-pure-insert-01-enabled-paste.png",
-          "sha256": "3ab19afb985677637a7e99381f9d8c42d116368e297ed9862d2e76a1a1fa82b0"
+          "file": "recovered-pure-insert-01-enabled-paste.jpg",
+          "sha256": "3ab19afb985677637a7e99381f9d8c42d116368e297ed9862d2e76a1a1fa82b0",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-insert-02-extra-disabled.png",
-          "sha256": "47ce42631d7a7ca2aac44d7582e91877021a22144859a013d229272be8e42469"
+          "file": "recovered-pure-insert-02-extra-disabled.jpg",
+          "sha256": "47ce42631d7a7ca2aac44d7582e91877021a22144859a013d229272be8e42469",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-insert-03-shift-raw.png",
-          "sha256": "f3db8adf6299f2edb421d5b6551cd51c06038e372fab964881b5b003e40a6ebb"
+          "file": "recovered-pure-insert-03-shift-raw.jpg",
+          "sha256": "f3db8adf6299f2edb421d5b6551cd51c06038e372fab964881b5b003e40a6ebb",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-insert-04-insert-raw.png",
-          "sha256": "022d5abce029d3a03dec4b95a1cb42c2682547feaa6c20e469d75a6ffc8bd695"
+          "file": "recovered-pure-insert-04-insert-raw.jpg",
+          "sha256": "022d5abce029d3a03dec4b95a1cb42c2682547feaa6c20e469d75a6ffc8bd695",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-insert-05-basic-paste.png",
-          "sha256": "978936a33d4001e643ecb75fbfc858dc805df09e2ce34e853d5fe8b04902f864"
+          "file": "recovered-pure-insert-05-basic-paste.jpg",
+          "sha256": "978936a33d4001e643ecb75fbfc858dc805df09e2ce34e853d5fe8b04902f864",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         },
         {
-          "file": "recovered-pure-insert-06-basic-shift-paste.png",
-          "sha256": "3379756d173ae660c10d24443aba67eaaf67164fef56ae9b533be62618699ea0"
+          "file": "recovered-pure-insert-06-basic-shift-paste.jpg",
+          "sha256": "3379756d173ae660c10d24443aba67eaaf67164fef56ae9b533be62618699ea0",
+          "format": "JPEG",
+          "mime": "image/jpeg"
         }
       ],
       "exit_observation": "活动bash仍存在时关闭整个窗口，调试产物在退出检查发现TerminalView leaked handle；按键主链通过，退出生命周期未通过，本次未据此归因。"
