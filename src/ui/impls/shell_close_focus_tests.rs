@@ -463,3 +463,6 @@ mod startup_shortcut_tests;
 
 #[path = "shell_tab_cycle_tests.rs"]
 mod tab_cycle_tests;
+
+#[path = "shell_pane_cycle_tests.rs"]
+mod pane_cycle_tests;
