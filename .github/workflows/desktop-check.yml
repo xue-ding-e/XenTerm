@@ -67,3 +67,11 @@ jobs:
           XDG_DATA_HOME: ${{ runner.temp }}/xenterm-gui-data
           XDG_RUNTIME_DIR: ${{ runner.temp }}/xenterm-gui-runtime
         run: cargo test --locked --target ${{ matrix.target }} --jobs 2 ui::toolkit_regression_tests -- --test-threads=1
+      - name: Test complete integrated desktop suite on Linux
+        if: runner.os == 'Linux'
+        env:
+          XDG_CONFIG_HOME: ${{ runner.temp }}/xenterm-full-config
+          XDG_DATA_HOME: ${{ runner.temp }}/xenterm-full-data
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/xenterm-full-runtime
+        # Run every registered regression; existing ignored benchmarks stay ignored.
+        run: cargo test --locked --target ${{ matrix.target }} --jobs 2 -- --test-threads=1
