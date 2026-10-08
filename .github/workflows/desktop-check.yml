@@ -47,6 +47,8 @@ jobs:
       # Keep the upstream stable/MSVC Windows configuration. Debug checking
       # avoids the release-only fxc.exe shader compilation and package tooling.
       - run: cargo check --locked --target ${{ matrix.target }} --jobs 2
+      - name: Build desktop executable
+        run: cargo build --locked --target ${{ matrix.target }} --jobs 2
       # Separate invocations so PowerShell cannot hide a failing first command
       # behind the second native command's successful exit status.
       - name: Test session editor interactions

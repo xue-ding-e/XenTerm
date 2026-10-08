@@ -23,6 +23,8 @@ jobs:
       - run: cargo build --locked --no-default-features --features headless
       - run: python tests/config_import_e2e.py --exe target/debug/xenterm
       - run: python tests/config_export_e2e.py --exe target/debug/xenterm
+      - run: python tests/migration_modes_e2e.py --exe target/debug/xenterm
+      - run: python tests/migration_preview_e2e.py --exe target/debug/xenterm
       - run: python tests/cli_exec_e2e.py --exe target/debug/xenterm
       - run: python tests/ssh_jump_chain_e2e.py --exe target/debug/xenterm
       - run: python tests/ssh_stack_e2e.py --exe target/debug/xenterm
