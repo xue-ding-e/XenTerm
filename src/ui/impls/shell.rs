@@ -522,6 +522,10 @@ mod overlay_geometry_tests;
 mod file_dialog_tests;
 
 #[cfg(test)]
+#[path = "sftp_copy_path_tests.rs"]
+mod sftp_copy_path_tests;
+
+#[cfg(test)]
 mod join_remote_tests {
     use super::join_remote;
 
