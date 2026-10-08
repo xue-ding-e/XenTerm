@@ -526,6 +526,10 @@ mod file_dialog_tests;
 mod sftp_copy_path_tests;
 
 #[cfg(test)]
+#[path = "group_dialog_tests.rs"]
+mod group_dialog_tests;
+
+#[cfg(test)]
 mod join_remote_tests {
     use super::join_remote;
 
