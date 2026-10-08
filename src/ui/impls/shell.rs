@@ -530,6 +530,10 @@ mod sftp_copy_path_tests;
 mod group_dialog_tests;
 
 #[cfg(test)]
+#[path = "quick_popover_tests.rs"]
+mod quick_popover_tests;
+
+#[cfg(test)]
 mod join_remote_tests {
     use super::join_remote;
 
