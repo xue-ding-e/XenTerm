@@ -22,13 +22,21 @@ logs, and never restores or mirrors another profile or uses the shared OS
 keyring. Make this directory private to the service account. The normal GUI
 profile selection is unchanged when neither option nor variable is supplied.
 
-Do not run the GUI and a headless service against the same profile at the same
-time. Use a separate `--data-dir` for the service, and close any GUI using a
-profile before importing into it. The importer detects stale state during its
-own transaction, but existing GUI/background writers do not all perform that
-check: a later save from an already-open GUI can replace newer session state.
-Directory selection does not enforce exclusive use or provide a cross-process
-profile lock. Pointing `--data-dir` at an installed profile backed by the OS
+Use a separate `--data-dir` for the service. All current GUI, background-save,
+CLI and MCP import writers compare their loaded snapshot and a per-commit token
+inside a SQLite write transaction. A stale writer is rejected before changing
+rows or credentials; queued background snapshots cannot overwrite newer saves.
+The GUI keeps a persistent warning on a failed save. Keep any pending edits,
+reopen XenTerm to reload the latest profile, then reapply them deliberately.
+There is no automatic merge, forced overwrite, or silent retry. See
+[profile consistency and recovery](profile-consistency.md) for the lock,
+credential-recovery and backup behavior.
+
+Raw database rows are checked as well, so changes written without the new token
+are detected. An older application can still overwrite data after a new writer
+commits: upgrade every writer, and never rely on this protection when mixing old
+versions or directly replacing profile files. Directory selection itself does
+not grant exclusive ownership of a profile. Pointing `--data-dir` at an installed profile backed by the OS
 keyring is unsupported. Startup checks reject keyring markers, encrypted values
 without a local key, and values that the local key cannot decrypt before creating
 keys, logs or database sidecars. Export from the original application and import
@@ -56,14 +64,21 @@ between profiles or computers. Unsupported transport kinds are rejected instead
 of silently changing their meaning. A batch containing RDP sessions is rejected
 in full because XenTerm does not implement that transport.
 
-The public MeatShell branch also exports `session_log`, `allow_secret_reveal`
-and `rdp_domain`/`rdp_width`/`rdp_height`/`rdp_fullscreen` metadata. This XenTerm
+The public MeatShell branch also exports `session_log` and
+`rdp_domain`/`rdp_width`/`rdp_height`/`rdp_fullscreen` metadata. This XenTerm
 version does not implement those settings. Preview and apply explicitly return
-`warnings` naming these known unsupported fields and the number of affected
-entries; no field values or session identifiers are included. Unknown optional
-fields produce a generic warning without echoing their names or values. These
-settings are not applied, and importing never enables secret reveal. Review the
+`warnings` naming known unsupported fields and the number of affected entries;
+no field values or session identifiers are included. Unknown optional fields
+produce a generic warning without echoing their names or values. Review the
 preview and retain your original export if these preferences matter to you.
+
+`allow_secret_reveal` is understood and exported, but importing always resets it
+to `false`. A `true` value produces a `local_permission_reset` warning in both
+preview and apply: opt in again through the local session editor if desired.
+This local permission is excluded from duplicate matching, so reimporting an
+otherwise identical session neither creates a duplicate nor changes an
+existing local choice. CLI/MCP metadata remains credential-free even if a local
+session permits GUI reveal.
 
 Imports are **append-only**. An equivalent complete profile, including its
 credentials and resolved jump route, is skipped. Profiles sharing an endpoint

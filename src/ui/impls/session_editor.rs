@@ -18,24 +18,27 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use zeroize::Zeroize;
 
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants},
         h_flex,
-        input::{Input, InputState},
+        input::{Input, InputState, Textarea, TextareaState},
         setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-        v_flex, ActiveTheme, AxisExt as _, Icon, Sizable as _,
+        switch::Switch,
+        v_flex, ActiveTheme, AxisExt as _, Disableable as _, Icon, Sizable as _,
     },
     div,
     prelude::*,
-    px, relative, AnyElement, Context, Entity, Hsla, IntoElement, Render, SharedString, Window,
+    px, relative, AnyElement, Context, Entity, Focusable as _, Hsla, IntoElement, Render,
+    SharedString, Window,
 };
 
 use gpui_kit::assets::IconName;
 
 use crate::config::{ConfigStore, Session};
-use crate::core::SessionDraft;
+use crate::core::{SessionDraft, SessionDraftError};
 
 /// What the editor asks the shell to do when it closes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +59,7 @@ pub(crate) struct SessionEditor {
     store: Rc<RefCell<ConfigStore>>,
     /// Set when the dialog is finished, so the shell can take the outcome.
     outcome: Option<EditorOutcome>,
-    /// A failed save leaves the form open and explains how to retry.
+    /// A failed save leaves the form open and explains how to recover safely.
     save_error: Option<&'static str>,
     /// The port-forwarding rows. Their text fields are entities and so cannot be rebuilt
     /// every frame the way the settings fields are; the rows are kept here instead, and
@@ -74,6 +77,17 @@ pub(crate) struct SessionEditor {
     /// The password box, masked (audit N-低1): its text lives in the entity and
     /// reaches the draft when the form is saved, like the table rows.
     password: Option<Entity<InputState>>,
+    /// Read-only, disposable previews. They never feed a replacement input or its undo history.
+    secret_previews: [Option<Entity<TextareaState>>; 2],
+    reset_previews: bool,
+}
+
+impl Drop for SessionEditor {
+    fn drop(&mut self) {
+        let mut draft = self.draft.borrow_mut();
+        draft.password.zeroize();
+        draft.private_key_inline.zeroize();
+    }
 }
 
 /// One row of the trigger table: what to watch for, and what to answer.
@@ -213,6 +227,8 @@ impl SessionEditor {
             triggers: Rc::new(RefCell::new(Vec::new())),
             next_trigger_id: 1,
             password: None,
+            secret_previews: [None, None],
+            reset_previews: false,
         }
     }
 
@@ -229,6 +245,8 @@ impl SessionEditor {
             triggers: Rc::new(RefCell::new(Vec::new())),
             next_trigger_id: 1,
             password: None,
+            secret_previews: [None, None],
+            reset_previews: false,
         }
     }
 
@@ -325,6 +343,13 @@ impl SessionEditor {
         self.sync_password(cx);
         let session = {
             let mut draft = self.draft.borrow_mut();
+            // Validation is local and happens before mutating the store or assigning
+            // an id. Saving an offline target must never wait for a connection test.
+            if let Err(error) = draft.validate() {
+                self.save_error = Some(draft_validation_message(error));
+                self.outcome = None;
+                return;
+            }
             // Keep this id through a failed save and retry, rather than minting a
             // new identity on every click (or leaving an unsaved row in the store).
             if draft.id.is_empty() {
@@ -340,10 +365,12 @@ impl SessionEditor {
             self.outcome = None;
             return;
         }
-        match self.store.borrow_mut().upsert_and_save(session) {
+        let result = self.store.borrow_mut().upsert_and_save(session.clone());
+        match result {
             Ok(()) => {
                 self.save_error = None;
                 self.outcome = Some(EditorOutcome::Saved);
+                self.original = Some(session);
             }
             Err(error) => {
                 // The diagnostic is deliberately selected from static text: an
@@ -354,6 +381,151 @@ impl SessionEditor {
                 self.outcome = None;
             }
         }
+    }
+
+    /// Drop all credential UI entities, including selection/undo history. The toolkit's
+    /// text storage is not zeroizable, so do not claim that this erases every heap copy.
+    /// No clipboard write occurs: copying a revealed selection is a separate user action.
+    pub(crate) fn clear_sensitive_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_secret_previews(window, cx);
+        if let Some(input) = self.password.take() {
+            input.update(cx, |input, cx| {
+                if input.focus_handle(cx).is_focused(window) {
+                    window.blur(cx);
+                }
+                input.set_value("", window, cx);
+            });
+        }
+        let mut draft = self.draft.borrow_mut();
+        draft.password.zeroize();
+        draft.private_key_inline.zeroize();
+    }
+
+    fn hide_secret_preview(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(preview) = self.secret_previews[index].take() {
+            preview.update(cx, |preview, cx| {
+                if preview.focus_handle(cx).is_focused(window) {
+                    window.blur(cx);
+                }
+                // Root's focused-input registry or the previous frame can retain an
+                // entity. Clear text, selection and undo history before releasing ours.
+                preview.set_value("", window, cx);
+            });
+        }
+    }
+
+    fn clear_secret_previews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for index in 0..2 {
+            self.hide_secret_preview(index, window, cx);
+        }
+    }
+
+    fn set_secret_reveal_allowed(
+        &mut self,
+        allowed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.draft.borrow_mut().allow_secret_reveal = allowed;
+        if !allowed {
+            self.clear_secret_previews(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_secret_preview(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.draft.borrow().allow_secret_reveal {
+            self.clear_secret_previews(window, cx);
+            return;
+        }
+        if self.secret_previews[index].is_some() {
+            self.hide_secret_preview(index, window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(original) = self.original.as_ref() else {
+            return;
+        };
+        let secret = if index == 0 {
+            &original.password
+        } else {
+            &original.private_key_inline
+        };
+        // Never reveal a ciphertext/marker if a profile could not decrypt the value.
+        if secret.is_empty() || secret.is_local_ciphertext() {
+            return;
+        }
+        self.secret_previews[index] = Some(cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(if index == 0 { 2 } else { 5 })
+                .default_value(secret.as_str().to_string())
+        }));
+        cx.notify();
+    }
+
+    fn saved_secret_field(&self, index: usize, cx: &Context<Self>) -> SettingField<SharedString> {
+        let editor = cx.entity().downgrade();
+        let allowed = self.draft.borrow().allow_secret_reveal;
+        let preview = self.secret_previews[index].clone();
+        let available = self.original.as_ref().is_some_and(|session| {
+            let secret = if index == 0 {
+                &session.password
+            } else {
+                &session.private_key_inline
+            };
+            !secret.is_empty() && !secret.is_local_ciphertext()
+        });
+        SettingField::element(
+            move |_: &gpui_kit::component::setting::RenderOptions,
+                  _: &mut Window,
+                  _: &mut gpui_kit::App| {
+                let editor = editor.clone();
+                let visible = preview.is_some();
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new(if index == 0 {
+                            "saved-password-reveal"
+                        } else {
+                            "saved-key-reveal"
+                        })
+                        .debug_selector(move || {
+                            if index == 0 {
+                                "saved-password-reveal".into()
+                            } else {
+                                "saved-key-reveal".into()
+                            }
+                        })
+                        .icon(if visible {
+                            IconName::EyeOff
+                        } else {
+                            IconName::Eye
+                        })
+                        .label(if visible {
+                            crate::i18n::t("隐藏", "Hide")
+                        } else {
+                            crate::i18n::t("查看已保存值", "Show saved value")
+                        })
+                        .disabled(!allowed || !available)
+                        .on_click(move |_, window, cx| {
+                            if let Some(editor) = editor.upgrade() {
+                                editor.update(cx, |editor, cx| {
+                                    editor.toggle_secret_preview(index, window, cx)
+                                });
+                            }
+                        }),
+                    )
+                    .when_some(preview.clone(), |field, preview| {
+                        field.child(Textarea::new(&preview).readonly(true).h(px(if index == 0 {
+                            60.
+                        } else {
+                            120.
+                        })))
+                    })
+                    .into_any_element()
+            },
+        )
     }
 
     /// Copy what the password box holds into the draft. Empty keeps the
@@ -418,10 +590,52 @@ impl SessionEditor {
             move |value, cx| {
                 set(&mut write.borrow_mut(), value.to_string());
                 if let Some(editor) = editor.upgrade() {
-                    editor.update(cx, |_, cx| cx.notify());
+                    editor.update(cx, |editor, cx| {
+                        // Changing transport/auth must not restore a previously visible secret.
+                        editor.reset_previews = true;
+                        cx.notify();
+                    });
                 }
             },
         )
+    }
+}
+
+/// Static, localized form guidance; never interpolate an input or a secret.
+fn draft_validation_message(error: SessionDraftError) -> &'static str {
+    match error {
+        SessionDraftError::Host => crate::i18n::t(
+            "请输入有效主机名或 IP 地址，不要包含空格、协议或端口。输入已保留。",
+            "Enter a valid hostname or IP address without spaces, a scheme or a port. Your entries are kept.",
+        ),
+        SessionDraftError::Port => crate::i18n::t(
+            "端口须为 1–65535 的整数，或留空使用默认端口。输入已保留。",
+            "Port must be a whole number from 1 to 65535, or blank for the default. Your entries are kept.",
+        ),
+        SessionDraftError::SerialDevice => crate::i18n::t(
+            "请输入串口设备（例如 COM3 或 /dev/ttyUSB0）。输入已保留。",
+            "Enter a serial device (for example COM3 or /dev/ttyUSB0). Your entries are kept.",
+        ),
+        SessionDraftError::BaudRate => crate::i18n::t(
+            "波特率须为 1–4294967295 的整数。输入已保留。",
+            "Baud rate must be a whole number from 1 to 4294967295. Your entries are kept.",
+        ),
+        SessionDraftError::DataBits => crate::i18n::t(
+            "串口数据位须为 5、6、7 或 8。输入已保留。",
+            "Serial data bits must be 5, 6, 7 or 8. Your entries are kept.",
+        ),
+        SessionDraftError::StopBits => crate::i18n::t(
+            "串口停止位须为 1 或 2。输入已保留。",
+            "Serial stop bits must be 1 or 2. Your entries are kept.",
+        ),
+        SessionDraftError::Parity => crate::i18n::t(
+            "请选择有效的串口校验方式。输入已保留。",
+            "Choose a valid serial parity option. Your entries are kept.",
+        ),
+        SessionDraftError::FlowControl => crate::i18n::t(
+            "请选择有效的串口流控方式。输入已保留。",
+            "Choose a valid serial flow control option. Your entries are kept.",
+        ),
     }
 }
 
@@ -429,8 +643,14 @@ impl SessionEditor {
 fn save_failure_message(error: &anyhow::Error) -> &'static str {
     if error.is::<crate::config::SessionCredentialRollbackFailed>() {
         return crate::i18n::t(
-            "保存失败，且无法确认系统钥匙串中的原密码已恢复。输入已保留；钥匙串中的密码可能已改变，请检查后再重试。",
-            "Could not save or verify that the original keyring password was restored. Your entries are kept, but the keyring password may have changed; check it before retrying.",
+            "无法确认保存结果或系统钥匙串中的原密码已恢复。输入已保留；请先保留修改并重新打开 XenTerm 尝试恢复，检查凭据后再重试。",
+            "Could not confirm the save outcome or verify that the original keyring password was restored. Your entries are kept; copy pending edits, reopen XenTerm to attempt recovery, and check credentials before retrying.",
+        );
+    }
+    if error.is::<crate::config::ConfigurationChanged>() {
+        return crate::i18n::t(
+            "配置已在其他窗口或进程中更改，本次编辑未保存。输入仍保留在此处；请先复制待保存的修改，再重新打开 XenTerm 以重新加载配置，然后再保存。",
+            "Configuration changed elsewhere, so your changes were not saved. Your entries are kept here; copy pending edits, then reopen XenTerm to reload before saving.",
         );
     }
     if let Some(rusqlite::Error::SqliteFailure(failure, _)) = error.downcast_ref() {
@@ -611,15 +831,10 @@ fn forwards_element(
         // The note is its own line rather than the button row's tail: a note
         // long enough to meet the card edge reads as content leaking out of
         // the card, however honestly the truncation trims it.
-        .child(
-            div()
-                .text_xs()
-                .text_color(muted)
-                .child(crate::i18n::t(
-                    "监听固定为 127.0.0.1，动态规则不需要目标。",
-                    "The listener is 127.0.0.1; a dynamic rule needs no target.",
-                )),
-        )
+        .child(div().text_xs().text_color(muted).child(crate::i18n::t(
+            "监听固定为 127.0.0.1，动态规则不需要目标。",
+            "The listener is 127.0.0.1; a dynamic rule needs no target.",
+        )))
         .when(empty, |this| {
             this.child(div().text_xs().text_color(muted).child(crate::i18n::t(
                 "还没有转发规则。会话连上后它们会一起启动。",
@@ -676,7 +891,12 @@ fn triggers_element(
                         .min_w(px(200.))
                         .gap_2()
                         .items_center()
-                        .child(div().flex_1().min_w(px(110.)).child(Input::new(&row.expect)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(110.))
+                                .child(Input::new(&row.expect)),
+                        )
                         .child(Icon::new(IconName::ArrowRight).size_3().text_color(muted)),
                 )
                 .child(
@@ -685,7 +905,12 @@ fn triggers_element(
                         .min_w(px(240.))
                         .gap_2()
                         .items_center()
-                        .child(div().flex_1().min_w(px(110.)).child(Input::new(&row.response))),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(110.))
+                                .child(Input::new(&row.response)),
+                        ),
                 )
                 .child(
                     // Two flags rather than a menu: each is a sentence, and a switch that
@@ -810,15 +1035,10 @@ fn triggers_element(
                         }),
                 ),
         )
-        .child(
-            div()
-                .text_xs()
-                .text_color(muted)
-                .child(crate::i18n::t(
-                    "输出里出现左侧文字时，自动回答右侧内容。",
-                    "When the left text appears in the output, the right is sent.",
-                )),
-        )
+        .child(div().text_xs().text_color(muted).child(crate::i18n::t(
+            "输出里出现左侧文字时，自动回答右侧内容。",
+            "When the left text appears in the output, the right is sent.",
+        )))
         .when(empty, |this| {
             this.child(div().text_xs().text_color(muted).child(crate::i18n::t(
                 "还没有自动应答规则。",
@@ -829,14 +1049,26 @@ fn triggers_element(
         .into_any_element()
 }
 
+// The render is one long method by choice: of its ~500 lines, most are the
+// form's field declarations, each two to five lines of `SettingField` wiring
+// that names a draft accessor and a store setter. Extracting them into a
+// builder would move 25 values through a tuple (or a struct that exists only
+// to carry them between two methods called once each) — a second naming of
+// everything for no reading gain. The reusable pieces (`Self::text`,
+// `saved_secret_field`, `forwards_element`, `triggers_element`) already are
+// methods; what remains is the form's own inventory.
 impl Render for SessionEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.reset_previews {
+            self.clear_secret_previews(window, cx);
+            self.reset_previews = false;
+        }
         self.seed_forwards(window, cx);
         self.seed_triggers(window, cx);
         self.seed_password(window, cx);
         let draft = self.draft.clone();
         let editor = cx.entity().downgrade();
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         // Which fields apply is read here, once per frame, because the form is rebuilt
         // every frame and the kind can change while it is open. `SettingField::visible`
         // takes a plain bool set at build time, so a field that showed or hid itself
@@ -863,17 +1095,9 @@ impl Render for SessionEditor {
 
         let host = Self::text(&draft, |d| d.host.clone(), |d, v| d.host = v);
         let user = Self::text(&draft, |d| d.user.clone(), |d, v| d.user = v);
-        let port = {
-            let read = draft.clone();
-            let write = draft.clone();
-            // A port is a whole number, which is why this is a number field and not an
-            // input: the only thing it can hold is a port.
-            SettingField::number_input(
-                Default::default(),
-                move |_| f64::from(read.borrow().port),
-                move |value, _| write.borrow_mut().port = value as i32,
-            )
-        };
+        // Keep the exact text until Save. A number field parses f64 eagerly, losing
+        // empty/non-numeric edits and truncating fractions before validation can see them.
+        let port = Self::text(&draft, |d| d.port.clone(), |d, v| d.port = v);
 
         let auth = Self::choice(
             &draft,
@@ -927,6 +1151,36 @@ impl Render for SessionEditor {
                 },
             )
         };
+        let reveal_allowed = {
+            let allowed = draft.borrow().allow_secret_reveal;
+            let editor = editor.clone();
+            SettingField::element(
+                move |options: &gpui_kit::component::setting::RenderOptions,
+                      _: &mut Window,
+                      _: &mut gpui_kit::App| {
+                    let editor = editor.clone();
+                    div()
+                        .debug_selector(|| "allow-secret-reveal".into())
+                        .w(px(36.))
+                        .child(
+                            Switch::new("allow-secret-reveal")
+                                .checked(allowed)
+                                .disabled(options.is_disabled())
+                                .with_size(options.size())
+                                .on_click(move |allowed, window, cx| {
+                                    if let Some(editor) = editor.upgrade() {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.set_secret_reveal_allowed(*allowed, window, cx)
+                                        });
+                                    }
+                                }),
+                        )
+                        .into_any_element()
+                },
+            )
+        };
+        let saved_password = self.saved_secret_field(0, cx);
+        let saved_key = self.saved_secret_field(1, cx);
         let key_path = Self::text(
             &draft,
             |d| d.private_key_path.clone(),
@@ -944,33 +1198,9 @@ impl Render for SessionEditor {
         // has values to show rather than empty ones. They are only *added* when the kind
         // is serial.
         let device = Self::text(&draft, |d| d.serial_port.clone(), |d, v| d.serial_port = v);
-        let baud = {
-            let read = draft.clone();
-            let write = draft.clone();
-            SettingField::number_input(
-                Default::default(),
-                move |_| f64::from(read.borrow().baud_rate),
-                move |value, _| write.borrow_mut().baud_rate = value as i32,
-            )
-        };
-        let data_bits = {
-            let read = draft.clone();
-            let write = draft.clone();
-            SettingField::number_input(
-                Default::default(),
-                move |_| f64::from(read.borrow().data_bits),
-                move |value, _| write.borrow_mut().data_bits = value as i32,
-            )
-        };
-        let stop_bits = {
-            let read = draft.clone();
-            let write = draft.clone();
-            SettingField::number_input(
-                Default::default(),
-                move |_| f64::from(read.borrow().stop_bits),
-                move |value, _| write.borrow_mut().stop_bits = value as i32,
-            )
-        };
+        let baud = Self::text(&draft, |d| d.baud_rate.clone(), |d, v| d.baud_rate = v);
+        let data_bits = Self::text(&draft, |d| d.data_bits.clone(), |d, v| d.data_bits = v);
+        let stop_bits = Self::text(&draft, |d| d.stop_bits.clone(), |d, v| d.stop_bits = v);
         let parity = Self::choice(
             &draft,
             editor.clone(),
@@ -1056,7 +1286,14 @@ impl Render for SessionEditor {
         } else {
             connection = connection
                 .item(SettingItem::new(crate::i18n::t("主机", "Host"), host))
-                .item(SettingItem::new(crate::i18n::t("端口", "Port"), port))
+                .item(
+                    SettingItem::new(crate::i18n::t("端口", "Port"), port).description(
+                        crate::i18n::t(
+                            "留空使用默认端口：SSH 22，Telnet 23。",
+                            "Leave blank for the default: SSH 22, Telnet 23.",
+                        ),
+                    ),
+                )
                 .item(SettingItem::new(crate::i18n::t("用户名", "Username"), user));
         }
         connection = connection.item(SettingItem::new(crate::i18n::t("分组", "Group"), group));
@@ -1071,9 +1308,8 @@ impl Render for SessionEditor {
                 .item(
                     SettingItem::new(crate::i18n::t("密码", "Password"), password).description(
                         crate::i18n::t(
-                            "留空表示保留已保存的密码，密码不会被读回界面。",
-                            "Left blank, the saved password is kept. A password is never read \
-                             back into a form.",
+                            "留空保留原密码。私钥认证时，此字段是密钥口令。",
+                            "Leave empty to keep the saved value. For key authentication this is the key passphrase.",
                         ),
                     ),
                 )
@@ -1094,6 +1330,19 @@ impl Render for SessionEditor {
                     ),
                 ),
             );
+        }
+
+        if !is_serial {
+            credentials = credentials
+                .item(SettingItem::new(crate::i18n::t("允许查看已保存凭据", "Allow viewing saved credentials"), reveal_allowed)
+                    .description(crate::i18n::t("仅本机会话编辑器。仍需点击眼睛查看；关闭后再次打开总是隐藏。复制需自行选择文本。", "Local session editor only. A separate reveal click is required; reopening always starts hidden. Select text explicitly to copy.")))
+                .item(SettingItem::new(crate::i18n::t("已保存密码 / 密钥口令", "Saved password / key passphrase"), saved_password));
+            if is_ssh && draft.borrow().private_key_inline_mode {
+                credentials = credentials.item(SettingItem::new(
+                    crate::i18n::t("已保存内联私钥", "Saved inline private key"),
+                    saved_key,
+                ));
+            }
         }
 
         let advanced = SettingGroup::new()
@@ -1202,7 +1451,8 @@ impl Render for SessionEditor {
             .icon(IconName::X)
             .label(crate::i18n::t("取消", "Cancel"))
             .ghost()
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.clear_sensitive_inputs(window, cx);
                 this.outcome = Some(EditorOutcome::Cancelled);
                 cx.notify();
             }));
@@ -1212,8 +1462,11 @@ impl Render for SessionEditor {
             .icon(IconName::Check)
             .label(crate::i18n::t("保存", "Save"))
             .primary()
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
                 this.save(cx);
+                if this.outcome == Some(EditorOutcome::Saved) {
+                    this.clear_sensitive_inputs(window, cx);
+                }
                 cx.notify();
             }));
 
@@ -1228,19 +1481,34 @@ impl Render for SessionEditor {
                 // A settings page rather than a bare form: it already has the label /
                 // description / control layout, the section headings and the scrolling,
                 // and a hand-rolled column would be a second version of all three.
-                div().flex_1().min_h_0().overflow_hidden().child(
-                    Settings::new("session-editor")
-                        .page(
-                            SettingPage::new(crate::i18n::t("会话", "Session"))
-                                .group(connection)
-                                .group(credentials)
-                                .group(advanced),
-                        )
-                        .when(is_ssh, |settings| {
-                            settings.page(super::jump_chain_editor::page(self.draft.clone(), self.store.clone(), cx.entity().downgrade())).page(forwards_page).page(triggers_page)
-                        })
-                        .into_any_element(),
-                ),
+                // Field state is cached by row position. Give each transport its own
+                // subtree so a reused row cannot keep the old field's setter (for
+                // example, a serial device edit writing into the hidden SSH host).
+                div()
+                    .id(SharedString::from(format!("session-fields-{kind_value}")))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(
+                        Settings::new("session-editor")
+                            .page(
+                                SettingPage::new(crate::i18n::t("会话", "Session"))
+                                    .group(connection)
+                                    .group(credentials)
+                                    .group(advanced),
+                            )
+                            .when(is_ssh, |settings| {
+                                settings
+                                    .page(super::jump_chain_editor::page(
+                                        self.draft.clone(),
+                                        self.store.clone(),
+                                        cx.entity().downgrade(),
+                                    ))
+                                    .page(forwards_page)
+                                    .page(triggers_page)
+                            })
+                            .into_any_element(),
+                    ),
             )
             .child(
                 v_flex()
@@ -1343,6 +1611,678 @@ mod tests {
         }
     }
 
+    fn secret_fixture() -> Session {
+        let mut session = Session::new_empty();
+        session.host = "synthetic.invalid".into();
+        session.password = crate::config::Secret::new("synthetic-saved-password");
+        session.private_key_inline = crate::config::Secret::new(
+            "-----BEGIN SYNTHETIC KEY-----\nfixture-only\n-----END SYNTHETIC KEY-----",
+        );
+        session
+    }
+
+    struct EditorDialogHarness {
+        root_subscription: Option<gpui_kit::Subscription>,
+    }
+
+    impl Render for EditorDialogHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.root_subscription.is_none() {
+                self.root_subscription = super::super::follow_root(window, cx);
+            }
+            div()
+                .size_full()
+                .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+        }
+    }
+
+    #[gpui_kit::gpui::test]
+    fn native_dialog_dismissal_clears_actual_editor_and_replacement_drops_old_view(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_kit::component::{Root, WindowExt as _};
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let harness = cx.new(|_| EditorDialogHarness {
+                root_subscription: None,
+            });
+            Root::new(harness, window, cx)
+        });
+        for cancel_key in ["escape", "cmd-."] {
+            let editor = cx.update(|window, cx| {
+                super::super::dialogs::bind_macos_cancel(cx);
+                let mut session = secret_fixture();
+                session.allow_secret_reveal = true;
+                let editor = cx.new(|_| SessionEditor::edit(fixture.store.clone(), session));
+                super::super::shell::Shell::editor_dialog(editor.clone(), window, cx);
+                window.draw(cx).clear(cx);
+                editor.update(cx, |editor, cx| {
+                    editor.toggle_secret_preview(0, window, cx);
+                    editor.toggle_secret_preview(1, window, cx);
+                    editor.password.as_ref().unwrap().update(cx, |input, cx| {
+                        input.set_value("synthetic-unsaved", window, cx);
+                        input.focus(window, cx);
+                    });
+                });
+                window.draw(cx).clear(cx);
+                editor
+            });
+            cx.simulate_keystrokes(cancel_key);
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                assert!(!window.has_active_dialog(cx));
+                editor.read_with(cx, |editor, _| {
+                    assert!(editor.secret_previews.iter().all(Option::is_none));
+                    assert!(editor.password.is_none());
+                    assert!(editor.draft.borrow().password.is_empty());
+                    assert!(editor.outcome.is_none(), "native dismissal never saves");
+                });
+            });
+        }
+        // Programmatic replacement skips toolkit on_close. Releasing the old view
+        // must still clear its shared draft, even while a field closure owns that draft.
+        let (old, draft) = cx.update(|window, cx| {
+            let mut session = secret_fixture();
+            session.allow_secret_reveal = true;
+            let editor = cx.new(|_| SessionEditor::edit(fixture.store.clone(), session));
+            super::super::shell::Shell::editor_dialog(editor.clone(), window, cx);
+            window.draw(cx).clear(cx);
+            let draft = editor.update(cx, |editor, cx| {
+                editor.toggle_secret_preview(0, window, cx);
+                editor.draft.borrow_mut().password = "synthetic-old-draft".into();
+                editor.draft.clone()
+            });
+            window.close_dialog(cx);
+            window.draw(cx).clear(cx);
+            (editor, draft)
+        });
+        let old_weak = old.downgrade();
+        drop(old);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(old_weak.upgrade().is_none());
+        assert!(draft.borrow().password.is_empty());
+        assert!(fixture.store.borrow().sessions().is_empty());
+    }
+
+    #[gpui_kit::gpui::test]
+    fn saved_secrets_require_permission_and_separate_click_and_never_autocopy(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let handle = Rc::new(RefCell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let store = fixture.store.clone();
+            let handle = handle.clone();
+            move |window, cx| {
+                let editor = cx.new(|_| SessionEditor::edit(store, secret_fixture()));
+                *handle.borrow_mut() = Some(editor.clone());
+                gpui_kit::component::Root::new(editor, window, cx)
+            }
+        });
+        let view = handle.borrow_mut().take().unwrap();
+        cx.update(|window, cx| {
+            window.resize(gpui_kit::size(px(1100.), px(1900.)));
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                "clipboard-sentinel".into(),
+            ));
+            window.draw(cx).clear(cx);
+        });
+        let eye = cx
+            .debug_bounds("saved-password-reveal")
+            .expect("real eye button");
+        cx.simulate_click(eye.center(), Modifiers::default());
+        view.update(cx, |editor, cx| {
+            assert!(editor.secret_previews.iter().all(Option::is_none));
+            assert!(editor
+                .password
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .value()
+                .is_empty());
+
+            assert!(
+                editor.secret_previews.iter().all(Option::is_none),
+                "permission alone never loads credentials"
+            );
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let permission = cx.debug_bounds("allow-secret-reveal").unwrap();
+        cx.simulate_click(permission.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let eye = cx.debug_bounds("saved-password-reveal").unwrap();
+        cx.simulate_click(eye.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let preview = view.read_with(cx, |editor, cx| {
+            assert!(editor
+                .password
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .value()
+                .is_empty());
+            assert!(editor.draft.borrow().password.is_empty());
+            let preview = editor.secret_previews[0].clone().unwrap();
+            assert_eq!(
+                preview.read(cx).value().as_ref(),
+                "synthetic-saved-password"
+            );
+            preview
+        });
+        cx.update(|window, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("clipboard-sentinel")
+            );
+            preview.update(cx, |state, cx| state.focus(window, cx));
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a cmd-c"
+        } else {
+            "ctrl-a ctrl-c"
+        });
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("synthetic-saved-password")
+            );
+        });
+        cx.simulate_input("must-not-change-preview");
+        assert_eq!(
+            preview.read_with(cx, |state, _| state.value().to_string()),
+            "synthetic-saved-password"
+        );
+        let eye = cx.debug_bounds("saved-password-reveal").unwrap();
+        cx.simulate_click(eye.center(), Modifiers::default());
+        assert!(view.read_with(cx, |editor, _| editor.secret_previews[0].is_none()));
+        preview.read_with(cx, |preview, _| {
+            assert!(
+                preview.value().is_empty(),
+                "even a retained preview has no text/history after hiding"
+            );
+            assert_eq!(preview.selected_range(), 0..0);
+        });
+        cx.update(|window, cx| {
+            use gpui_kit::component::WindowExt as _;
+            assert!(
+                window.focused_input(cx).is_none(),
+                "Root must not retain a focused hidden secret"
+            );
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                "hidden-sentinel".into(),
+            ))
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a cmd-c"
+        } else {
+            "ctrl-a ctrl-c"
+        });
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("hidden-sentinel")
+            )
+        });
+        let eye = cx.debug_bounds("saved-password-reveal").unwrap();
+        cx.simulate_click(eye.center(), Modifiers::default());
+        let fresh_preview =
+            view.read_with(cx, |editor, _| editor.secret_previews[0].clone().unwrap());
+        assert_ne!(fresh_preview.entity_id(), preview.entity_id());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let eye = cx.debug_bounds("saved-password-reveal").unwrap();
+        cx.simulate_click(eye.center(), Modifiers::default());
+        assert!(fresh_preview.read_with(cx, |state, _| state.value().is_empty()));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let eye = cx.debug_bounds("saved-key-reveal").unwrap();
+        cx.simulate_click(eye.center(), Modifiers::default());
+        view.update(cx, |editor, cx| {
+            assert_eq!(
+                editor.secret_previews[1]
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .value()
+                    .as_ref(),
+                secret_fixture().private_key_inline.as_str()
+            );
+            assert!(editor.draft.borrow().private_key_inline.is_empty());
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let permission = cx.debug_bounds("allow-secret-reveal").unwrap();
+        cx.simulate_click(permission.center(), Modifiers::default());
+        assert!(view.read_with(cx, |editor, _| editor
+            .secret_previews
+            .iter()
+            .all(Option::is_none)));
+        assert!(
+            fixture.store.borrow().sessions().is_empty(),
+            "viewing never saves"
+        );
+    }
+
+    #[gpui_kit::gpui::test]
+    fn reveal_cancel_save_and_reopen_keep_secrets_hidden_and_unchanged(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let mut original = secret_fixture();
+        original.allow_secret_reveal = true;
+        fixture
+            .store
+            .borrow_mut()
+            .upsert_and_save(original.clone())
+            .unwrap();
+        let (view, cx) = cx.add_window_view({
+            let store = fixture.store.clone();
+            let original = original.clone();
+            move |_, _| SessionEditor::edit(store, original)
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            view.update(cx, |editor, cx| {
+                assert!(editor.secret_previews.iter().all(Option::is_none));
+                assert!(editor
+                    .password
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .value()
+                    .is_empty());
+                editor.toggle_secret_preview(0, window, cx);
+                editor.toggle_secret_preview(1, window, cx);
+                editor.password.as_ref().unwrap().update(cx, |input, cx| {
+                    input.set_value("synthetic-unsaved-password", window, cx)
+                });
+                editor.draft.borrow_mut().password = "synthetic-draft-password".into();
+            });
+            window.draw(cx).clear(cx);
+        });
+        let cancel = cx.debug_bounds("editor-cancel").unwrap();
+        cx.simulate_click(cancel.center(), Modifiers::default());
+        view.update(cx, |editor, cx| {
+            assert_eq!(editor.take_outcome(), Some(EditorOutcome::Cancelled));
+            assert!(editor.secret_previews.iter().all(Option::is_none));
+            assert!(editor
+                .password
+                .as_ref()
+                .is_none_or(|input| input.read(cx).value().is_empty()));
+            assert!(editor.draft.borrow().password.is_empty());
+        });
+        assert_eq!(
+            fixture.store.borrow().sessions()[0].password.as_str(),
+            original.password.as_str()
+        );
+        // A fresh editor reuses the persisted opt-in, never a previous preview/selection.
+        view.update(cx, |editor, _| {
+            *editor = SessionEditor::edit(fixture.store.clone(), original.clone())
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            view.update(cx, |editor, cx| {
+                assert!(editor.secret_previews.iter().all(Option::is_none));
+                assert!(editor
+                    .password
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .value()
+                    .is_empty());
+                editor.toggle_secret_preview(0, window, cx);
+                editor.save(cx);
+                editor.clear_sensitive_inputs(window, cx);
+                assert_eq!(editor.take_outcome(), Some(EditorOutcome::Saved));
+                assert!(editor.secret_previews.iter().all(Option::is_none));
+                assert!(editor.password.is_none());
+            });
+        });
+        let saved = fixture.store.borrow().sessions()[0].clone();
+        assert!(saved.allow_secret_reveal);
+        assert_eq!(saved.password.as_str(), original.password.as_str());
+        assert_eq!(
+            saved.private_key_inline.as_str(),
+            original.private_key_inline.as_str()
+        );
+        let disk = fixture.disk_sessions();
+        assert!(disk[0].allow_secret_reveal);
+        assert_ne!(disk[0].password.as_str(), original.password.as_str());
+        assert_ne!(
+            disk[0].private_key_inline.as_str(),
+            original.private_key_inline.as_str()
+        );
+    }
+
+    /// Find a real text control through the keyboard focus chain, without reaching
+    /// into the toolkit's private state or substituting a draft setter for typing.
+    fn focus_editor_field(
+        cx: &mut gpui_kit::gpui::VisualTestContext,
+        value: &str,
+    ) -> gpui_kit::component::input::AnyInputState {
+        use gpui_kit::component::WindowExt as _;
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.blur(cx);
+        });
+        for _ in 0..40 {
+            let field = cx.update(|window, cx| {
+                window.focus_next(cx);
+                window.draw(cx).clear(cx);
+                window
+                    .focused_input(cx)
+                    .filter(|input| input.value(cx).as_ref() == value)
+            });
+            if let Some(field) = field {
+                return field;
+            }
+        }
+        panic!("visible editor field was not keyboard-focusable: {value}");
+    }
+
+    #[gpui_kit::gpui::test]
+    fn changing_transport_keeps_text_bound_to_the_visible_field(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let handle = Rc::new(RefCell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let store = fixture.store.clone();
+            let handle = handle.clone();
+            move |window, cx| {
+                let editor = cx.new(|_| SessionEditor::new_session(store, String::new()));
+                editor.update(cx, |editor, _| {
+                    let mut draft = editor.draft.borrow_mut();
+                    draft.name = "transport-test-name".into();
+                    draft.host = "offline.invalid".into();
+                    draft.port = "2222".into();
+                    draft.serial_port = "/dev/serial-fixture".into();
+                    draft.note = "transport-note".into();
+                });
+                *handle.borrow_mut() = Some(editor.clone());
+                gpui_kit::component::Root::new(editor, window, cx)
+            }
+        });
+        let view = handle.borrow_mut().take().unwrap();
+        cx.update(|window, cx| {
+            window.resize(gpui_kit::size(px(1100.), px(1900.)));
+            window.draw(cx).clear(cx);
+        });
+        for (kind, selection, initial, typed) in [
+            (
+                "serial",
+                "down down down enter",
+                "/dev/serial-fixture",
+                "/dev/serial-edited",
+            ),
+            (
+                "telnet",
+                "down down enter",
+                "offline.invalid",
+                "telnet.invalid",
+            ),
+            ("ssh", "down enter", "telnet.invalid", "edited.invalid"),
+        ] {
+            // Type is the next tab stop after Name. Activate the actual dropdown,
+            // then select SSH / Telnet / Serial through its real popup-menu actions.
+            focus_editor_field(cx, "transport-test-name");
+            cx.update(|window, cx| window.focus_next(cx));
+            cx.simulate_keystrokes("enter");
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.simulate_keystrokes(selection);
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            assert_eq!(
+                view.read_with(cx, |editor, _| editor.draft.borrow().kind.clone()),
+                kind
+            );
+
+            focus_editor_field(cx, initial);
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                "cmd-a backspace"
+            } else {
+                "ctrl-a backspace"
+            });
+            cx.simulate_input(typed);
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            view.read_with(cx, |editor, _| {
+                let draft = editor.draft.borrow();
+                if kind == "serial" {
+                    assert_eq!(draft.serial_port, typed);
+                    assert_eq!(draft.host, "offline.invalid");
+                } else {
+                    assert_eq!(draft.host, typed);
+                    assert_eq!(draft.serial_port, "/dev/serial-edited");
+                }
+                assert_eq!(draft.port, "2222");
+                assert_eq!(draft.note, "transport-note");
+                assert_eq!(draft.baud_rate, "115200");
+                assert_eq!(draft.data_bits, "8");
+                assert_eq!(draft.stop_bits, "1");
+            });
+        }
+        assert!(fixture.store.borrow().sessions().is_empty());
+    }
+
+    #[gpui_kit::gpui::test]
+    fn port_input_keeps_raw_edits_until_save(cx: &mut TestAppContext) {
+        use gpui_kit::component::WindowExt as _;
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let handle = Rc::new(RefCell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let store = fixture.store.clone();
+            let handle = handle.clone();
+            move |window, cx| {
+                let editor = cx.new(|_| SessionEditor::new_session(store, String::new()));
+                editor.update(cx, |editor, _| {
+                    editor.draft.borrow_mut().host = "offline.invalid".into()
+                });
+                *handle.borrow_mut() = Some(editor.clone());
+                gpui_kit::component::Root::new(editor, window, cx)
+            }
+        });
+        let view = handle.borrow_mut().take().unwrap();
+        cx.update(|window, cx| {
+            window.resize(gpui_kit::size(px(1100.), px(1900.)));
+            window.draw(cx).clear(cx);
+            window.blur(cx);
+        });
+        let mut port_input = None;
+        for _ in 0..40 {
+            port_input = cx.update(|window, cx| {
+                window.focus_next(cx);
+                window.draw(cx).clear(cx);
+                window
+                    .focused_input(cx)
+                    .filter(|input| input.value(cx).as_ref() == "22")
+            });
+            if port_input.is_some() {
+                break;
+            }
+        }
+        let port_input = port_input.expect("visible port input is keyboard-focusable");
+        for raw in ["65536", "-1", "0", "abc", "22.5", ""] {
+            cx.update(|window, cx| port_input.focus_handle(cx).focus(window, cx));
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                "cmd-a backspace"
+            } else {
+                "ctrl-a backspace"
+            });
+            if !raw.is_empty() {
+                cx.simulate_input(raw);
+            }
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            view.update(cx, |editor, cx| {
+                assert_eq!(
+                    editor.draft.borrow().port,
+                    raw,
+                    "the control must not keep the previous number or truncate it"
+                );
+                editor.save(cx);
+                if raw.is_empty() {
+                    assert_eq!(editor.take_outcome(), Some(EditorOutcome::Saved));
+                } else {
+                    assert!(editor.take_outcome().is_none());
+                    assert_eq!(
+                        editor.save_error,
+                        Some(draft_validation_message(SessionDraftError::Port))
+                    );
+                    assert!(editor.store.borrow().sessions().is_empty());
+                    assert_eq!(editor.draft.borrow().port, raw);
+                }
+            });
+        }
+        assert_eq!(fixture.disk_sessions()[0].port, 22);
+    }
+
+    #[gpui_kit::gpui::test]
+    fn invalid_form_clicks_keep_input_open_and_never_write_then_retry_once(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let (view, cx) = cx.add_window_view({
+            let store = fixture.store.clone();
+            move |_, _| SessionEditor::new_session(store, "fixture-group".into())
+        });
+        for (host, port, error) in [
+            ("", "22", SessionDraftError::Host),
+            ("   ", "22", SessionDraftError::Host),
+            ("bad host", "22", SessionDraftError::Host),
+            ("offline.invalid", "65536", SessionDraftError::Port),
+            ("offline.invalid", "-1", SessionDraftError::Port),
+            ("offline.invalid", "0", SessionDraftError::Port),
+            ("offline.invalid", "abc", SessionDraftError::Port),
+            ("offline.invalid", "22.5", SessionDraftError::Port),
+        ] {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                view.update(cx, |editor, cx| {
+                    let mut draft = editor.draft.borrow_mut();
+                    draft.host = host.into();
+                    draft.port = port.into();
+                    draft.note = "unsaved fixture note".into();
+                    editor.password.as_ref().unwrap().update(cx, |input, cx| {
+                        input.set_value("fixture-only-password", window, cx);
+                    });
+                });
+                window.draw(cx).clear(cx);
+            });
+            for _ in 0..2 {
+                let save = cx.debug_bounds("editor-save").unwrap();
+                cx.simulate_click(save.center(), Modifiers::default());
+                view.update(cx, |editor, cx| {
+                    assert_eq!(editor.take_outcome(), None);
+                    assert_eq!(editor.save_error, Some(draft_validation_message(error)));
+                    let draft = editor.draft.borrow();
+                    assert_eq!(draft.host, host);
+                    assert_eq!(draft.port, port);
+                    assert_eq!(draft.note, "unsaved fixture note");
+                    assert_eq!(draft.group, "fixture-group");
+                    assert_eq!(draft.password, "fixture-only-password");
+                    assert_eq!(
+                        editor.password.as_ref().unwrap().read(cx).value().as_ref(),
+                        "fixture-only-password"
+                    );
+                    assert!(
+                        draft.id.is_empty(),
+                        "invalid input does not acquire a saved identity"
+                    );
+                });
+                assert!(fixture.store.borrow().sessions().is_empty());
+                assert!(!fixture.store.borrow().path.exists());
+                cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                });
+                assert!(cx.debug_bounds("editor-save-error").is_some());
+            }
+        }
+        // Correct the input, keep optional name/user blank, and save without any
+        // reachable host, authentication, or connection test. A second click is idempotent.
+        view.update(cx, |editor, _| {
+            editor.draft.borrow_mut().port = "65535".into()
+        });
+        for _ in 0..2 {
+            let save = cx.debug_bounds("editor-save").unwrap();
+            cx.simulate_click(save.center(), Modifiers::default());
+            view.update(cx, |editor, _| {
+                assert_eq!(editor.take_outcome(), Some(EditorOutcome::Saved));
+                assert!(editor.save_error.is_none());
+            });
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+        }
+        let disk = fixture.disk_sessions();
+        assert_eq!(disk.len(), 1);
+        assert_eq!(disk[0].name, "offline.invalid");
+        assert_eq!(disk[0].port, 65535);
+        assert!(disk[0].user.is_empty());
+        assert!(cx.debug_bounds("editor-save-error").is_none());
+    }
+
+    #[gpui_kit::gpui::test]
+    fn invalid_edit_preserves_existing_store_and_can_be_cancelled(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let mut draft = SessionDraft::new_ssh();
+        draft.id = "valid-existing".into();
+        draft.host = "original.invalid".into();
+        let original = draft.to_session(None);
+        fixture
+            .store
+            .borrow_mut()
+            .upsert_and_save(original.clone())
+            .unwrap();
+        let (view, cx) = cx.add_window_view({
+            let store = fixture.store.clone();
+            move |_, _| SessionEditor::edit(store, original)
+        });
+        view.update(cx, |editor, cx| {
+            editor.draft.borrow_mut().port = "65536".into();
+            editor.save(cx);
+            assert!(editor.take_outcome().is_none());
+            assert_eq!(editor.draft.borrow().port, "65536");
+        });
+        assert_eq!(fixture.store.borrow().sessions()[0].port, 22);
+        assert_eq!(fixture.disk_sessions()[0].port, 22);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let cancel = cx.debug_bounds("editor-cancel").unwrap();
+        cx.simulate_click(cancel.center(), Modifiers::default());
+        assert_eq!(
+            view.update(cx, |editor, _| editor.take_outcome()),
+            Some(EditorOutcome::Cancelled)
+        );
+        assert_eq!(fixture.disk_sessions()[0].port, 22);
+    }
+
     #[gpui_kit::gpui::test]
     fn invalid_jump_route_keeps_editor_open_without_writing(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -1352,6 +2292,7 @@ mod tests {
             move |_, _| SessionEditor::new_session(store, String::new())
         });
         view.update(cx, |editor, cx| {
+            editor.draft.borrow_mut().host = "offline.invalid".into();
             editor.draft.borrow_mut().jump_session_ids = vec!["missing-hop".into()];
             editor.save(cx);
             assert!(editor.take_outcome().is_none());
@@ -1494,6 +2435,107 @@ mod tests {
         assert_eq!(disk[0].host, "edited.example");
     }
 
+    #[gpui_kit::gpui::test]
+    fn a_conflicting_save_keeps_the_editor_draft_and_external_changes(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let fixture = StoreFixture::new();
+        let mut draft = SessionDraft::new_ssh();
+        draft.id = "conflicting-fixture".into();
+        draft.host = "original.example".into();
+        draft.password = "original-fixture-password".into();
+        let original = draft.to_session(None);
+        fixture
+            .store
+            .borrow_mut()
+            .upsert_and_save(original.clone())
+            .unwrap();
+
+        // Another window starts from the same loaded snapshot, but its save
+        // bookkeeping is independent of the editor's stale in-memory store.
+        let mut other_window = {
+            let store = fixture.store.borrow();
+            let saved = store.saved_state.lock().unwrap().clone();
+            ConfigStore {
+                path: store.path.clone(),
+                backup_dir: None,
+                cache: store.cache.clone(),
+                key: store.key,
+                keyring_enabled: false,
+                saved_state: std::sync::Mutex::new(saved).into(),
+            }
+        };
+        let (view, cx) = cx.add_window_view({
+            let store = fixture.store.clone();
+            let original = original.clone();
+            move |_, _| SessionEditor::edit(store, original)
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            view.update(cx, |editor, cx| {
+                editor.draft.borrow_mut().host = "pending.example".into();
+                editor.password.as_ref().unwrap().update(cx, |input, cx| {
+                    input.set_value("pending-fixture-password", window, cx);
+                });
+            });
+        });
+
+        let mut external = original.clone();
+        external.host = "external.example".into();
+        other_window.upsert_and_save(external).unwrap();
+
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            let save = cx.debug_bounds("editor-save").expect("visible save button");
+            cx.simulate_click(save.center(), Modifiers::default());
+            view.update(cx, |editor, cx| {
+                assert_eq!(editor.take_outcome(), None, "the stale dialog stays open");
+                assert_eq!(
+                    editor.save_error,
+                    Some(save_failure_message(&crate::config::ConfigurationChanged.into()))
+                );
+                let draft = editor.draft.borrow();
+                assert_eq!(draft.id, original.id);
+                assert_eq!(draft.host, "pending.example");
+                assert_eq!(draft.password, "pending-fixture-password");
+                assert_eq!(
+                    editor.password.as_ref().unwrap().read(cx).value().as_ref(),
+                    "pending-fixture-password"
+                );
+            });
+            assert_eq!(fixture.store.borrow().sessions()[0].host, "original.example");
+            let disk = fixture.disk_sessions();
+            assert_eq!(disk.len(), 1);
+            assert_eq!(disk[0].host, "external.example");
+        }
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("editor-save-error").is_some());
+    }
+
+    #[test]
+    fn configuration_conflict_guidance_requires_the_typed_error() {
+        let expected = crate::i18n::t(
+            "配置已在其他窗口或进程中更改，本次编辑未保存。输入仍保留在此处；请先复制待保存的修改，再重新打开 XenTerm 以重新加载配置，然后再保存。",
+            "Configuration changed elsewhere, so your changes were not saved. Your entries are kept here; copy pending edits, then reopen XenTerm to reload before saving.",
+        );
+        let conflict = anyhow::Error::new(crate::config::ConfigurationChanged);
+        assert_eq!(save_failure_message(&conflict), expected);
+        let wrapped = conflict.context("fixture-secret-in-a-path-or-error");
+        assert_eq!(save_failure_message(&wrapped), expected);
+        assert!(!save_failure_message(&wrapped).contains("fixture-secret"));
+        assert_ne!(
+            save_failure_message(&anyhow::anyhow!("configuration changed elsewhere")),
+            expected,
+            "arbitrary error text must not be classified as a typed conflict"
+        );
+        let uncertain = wrapped.context(crate::config::SessionCredentialRollbackFailed);
+        assert_ne!(save_failure_message(&uncertain), expected);
+        assert!(!save_failure_message(&uncertain).contains("fixture-secret"));
+    }
+
     #[test]
     fn save_diagnostics_do_not_echo_error_details() {
         let error = anyhow::anyhow!("fixture-secret-in-an-arbitrary-error");
@@ -1504,8 +2546,8 @@ mod tests {
         assert_eq!(
             message,
             crate::i18n::t(
-                "保存失败，且无法确认系统钥匙串中的原密码已恢复。输入已保留；钥匙串中的密码可能已改变，请检查后再重试。",
-                "Could not save or verify that the original keyring password was restored. Your entries are kept, but the keyring password may have changed; check it before retrying.",
+                "无法确认保存结果或系统钥匙串中的原密码已恢复。输入已保留；请先保留修改并重新打开 XenTerm 尝试恢复，检查凭据后再重试。",
+                "Could not confirm the save outcome or verify that the original keyring password was restored. Your entries are kept; copy pending edits, reopen XenTerm to attempt recovery, and check credentials before retrying.",
             )
         );
         for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_FULL] {
@@ -1527,6 +2569,7 @@ mod tests {
             move |_, _| SessionEditor::new_session(store, String::new())
         });
         view.update(cx, |editor, cx| {
+            editor.draft.borrow_mut().host = "offline.invalid".into();
             editor.save(cx);
             assert_eq!(editor.take_outcome(), None);
         });
