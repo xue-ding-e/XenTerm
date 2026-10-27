@@ -194,7 +194,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     expect(session.versionReads, 0, reason: 'hidden pane must not poll');
     expect(session.snapshots, 0);
-    expect(session.resizes, 1, reason: 'layout still reports its size once');
+    expect(session.resizes, 0, reason: 'hidden layout must not reflow the PTY');
 
     active = true;
     await tester.pumpWidget(build());
