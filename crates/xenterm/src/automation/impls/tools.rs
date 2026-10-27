@@ -24,6 +24,8 @@ pub(crate) async fn call(name: &str, arguments: &Value, frontend: Frontend) -> R
 async fn call_inner(name: &str, arguments: &Value, frontend: Frontend) -> Result<Value> {
     match name {
         "get_access_policy" => get_access_policy(arguments, frontend),
+        "get_settings" => get_settings(arguments, frontend),
+        "update_settings" => update_settings(arguments, frontend),
         "list_sessions" => list_sessions(arguments, frontend),
         "get_session" => get_session(arguments, frontend),
         "import_sessions" => import_sessions(arguments, frontend),
@@ -57,6 +59,59 @@ fn get_access_policy(arguments: &Value, frontend: Frontend) -> Result<Value> {
     }
     let store = load_store(frontend)?;
     Ok(access_policy(&store))
+}
+
+fn require_settings_profile(explicit: bool) -> Result<()> {
+    anyhow::ensure!(explicit,
+        "settings automation requires an explicit --data-dir or XENTERM_DATA_DIR profile");
+    Ok(())
+}
+
+/// No new implicit MCP capability: for now configuration writes reuse both
+/// existing import opt-in and file-transfer gates. This never changes policy.
+fn require_settings_write(frontend: Frontend, file_transfers: bool) -> Result<()> {
+    anyhow::ensure!(
+        !frontend.is_unattended() || (frontend.allows_config_import() && file_transfers),
+        "settings updates reuse configuration-change authorization: MCP requires --allow-config-import and the configured file-transfer permission"
+    );
+    Ok(())
+}
+
+fn get_settings(arguments: &Value, frontend: Frontend) -> Result<Value> {
+    anyhow::ensure!(arguments.as_object().is_some_and(|v| v.is_empty()),
+        "get_settings accepts an empty object only");
+    require_settings_profile(crate::config::has_explicit_data_dir())?;
+    let mut store = load_store(frontend)?;
+    // load_store enforces the MCP enabled gate; the service owns projection.
+    let snapshot = store.settings_get().map_err(|_| anyhow!("settings unavailable; check the selected profile"))?;
+    Ok(serde_json::to_value(snapshot)?)
+}
+
+fn update_settings(arguments: &Value, frontend: Frontend) -> Result<Value> {
+    let object = arguments.as_object().context("settings arguments must be an object")?;
+    anyhow::ensure!(
+        object.len() == 2 && object.contains_key("patch") && object.contains_key("expected_revision"),
+        "update_settings requires only patch and expected_revision"
+    );
+    let patch = crate::config::SettingsPatch::from_json(object["patch"].clone())?;
+    let expected = required_string(arguments, "expected_revision")?;
+    require_settings_profile(crate::config::has_explicit_data_dir())?;
+    // Fail the process opt-in before loading or touching a profile at all.
+    require_settings_write(frontend, true)?;
+    let mut store = load_store(frontend)?;
+    update_settings_in_store(&mut store, patch, expected, frontend)
+}
+
+fn update_settings_in_store(
+    store: &mut ConfigStore,
+    patch: crate::config::SettingsPatch,
+    expected: &str,
+    frontend: Frontend,
+) -> Result<Value> {
+    require_settings_write(frontend, store.mcp_allow_file_transfers())?;
+    let snapshot = store.settings_update(patch, expected)
+        .map_err(|_| anyhow!("settings were not saved; keep pending edits, reload the selected profile and retry"))?;
+    Ok(serde_json::to_value(snapshot)?)
 }
 
 /// Import is append-only, preview-by-default for protocol callers, and requires
@@ -371,6 +426,54 @@ fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_keep_explicit_profile_and_both_existing_mcp_write_gates() {
+        assert!(require_settings_profile(false).is_err());
+        assert!(require_settings_profile(true).is_ok());
+        assert!(require_settings_write(Frontend::Cli, false).is_ok());
+        for import in [false, true] {
+            for transfers in [false, true] {
+                assert_eq!(
+                    require_settings_write(Frontend::Mcp { allow_config_import: import }, transfers).is_ok(),
+                    import && transfers
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn denied_mcp_settings_gate_never_changes_loaded_cache_or_disk() {
+        use crate::config::{ConfigFile, SavedState, SettingsPatch};
+        let directory = tempfile::tempdir().unwrap();
+        for (import, transfers) in [(false, false), (false, true), (true, false)] {
+            let cache = ConfigFile {
+                mcp_access_mode: Some(crate::config::McpAccessMode::Restricted),
+                mcp_allow_file_transfers: transfers,
+                ..Default::default()
+            };
+            let mut store = ConfigStore {
+                path: directory.path().join(format!("settings-{import}-{transfers}.db")),
+                backup_dir: None,
+                saved_state: std::sync::Mutex::new(SavedState::of_cache(&cache)).into(),
+                cache,
+                key: [7; 32],
+                keyring_enabled: false,
+            };
+            store.save().unwrap();
+            let revision = store.settings_get().unwrap().revision;
+            let before = serde_json::to_string(&store.cache).unwrap();
+            let bytes = std::fs::read(&store.path).unwrap();
+            assert!(update_settings_in_store(
+                &mut store,
+                SettingsPatch::from_json(json!({"font_size": 20})).unwrap(),
+                &revision,
+                Frontend::Mcp { allow_config_import: import },
+            ).is_err());
+            assert_eq!(serde_json::to_string(&store.cache).unwrap(), before);
+            assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+        }
+    }
 
     #[test]
     fn mcp_config_load_error_drops_sensitive_chain_but_cli_keeps_diagnostics() {

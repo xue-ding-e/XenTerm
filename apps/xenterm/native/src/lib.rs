@@ -1400,22 +1400,14 @@ pub extern "C" fn xenterm_log_delete(name: *const c_char) -> *mut c_char {
     }
 }
 
-/// The settings the Flutter UI can change, read from the core config.
+/// Non-secret settings, projected by the same service used by CLI and MCP.
 #[no_mangle]
 pub extern "C" fn xenterm_settings_json() -> *mut c_char {
     let result = (|| -> Result<String, String> {
         let store = store()?;
-        let store = store.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(serde_json::json!({
-            "session_logs": store.session_logs(),
-            "cursor_style": store.terminal_cursor_style(),
-            "line_spacing": store.terminal_line_spacing(),
-            "padding": store.terminal_padding(),
-            "bold": store.terminal_bold(),
-            "sftp_follow_cd": store.sftp_follow_cd(),
-            "download_dir": store.download_dir(),
-        })
-        .to_string())
+        let mut store = store.lock().unwrap_or_else(|p| p.into_inner());
+        let settings = store.settings_get().map_err(|_| "settings unavailable".to_owned())?;
+        serde_json::to_string(&settings).map_err(|_| "settings unavailable".into())
     })();
     match result {
         Ok(json) => to_c(json),
@@ -1423,42 +1415,39 @@ pub extern "C" fn xenterm_settings_json() -> *mut c_char {
     }
 }
 
-/// Applies any subset of the settings above and saves the store.
+/// Retains the flat JSON/C ABI while delegating validation and persistence.
+/// New callers send expected_revision; older callers are checked against the
+/// store's current revision while holding the same store mutex. The service
+/// additionally checks the on-disk fingerprint under its writer transaction.
 #[no_mangle]
 pub extern "C" fn xenterm_settings_set(json: *const c_char) -> *mut c_char {
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<xenterm::config::SettingsSnapshot, (&str, String)> {
         let raw = unsafe { take_c(json) };
-        let value: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|e| format!("invalid payload: {e}"))?;
-        let store = store()?;
+        let mut value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|_| ("invalid_settings", "settings payload must be valid JSON".into()))?;
+        let object = value.as_object_mut()
+            .ok_or_else(|| ("invalid_settings", "settings patch must be an object".into()))?;
+        let expected = object.remove("expected_revision").map(|v| {
+            v.as_str().map(str::to_owned)
+                .ok_or_else(|| ("invalid_settings", "expected_revision must be a string".into()))
+        }).transpose()?;
+        let patch = xenterm::config::SettingsPatch::from_json(value)
+            .map_err(|e| ("invalid_settings", e.to_string()))?;
+        let store = store().map_err(|_| ("settings_update_failed", "settings unavailable".into()))?;
         let mut store = store.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(enabled) = value.get("session_logs").and_then(|v| v.as_bool()) {
-            store.set_session_logs(enabled);
-        }
-        if let Some(style) = value.get("cursor_style").and_then(|v| v.as_str()) {
-            store.set_terminal_cursor_style(style.to_string());
-        }
-        if let Some(spacing) = value.get("line_spacing").and_then(|v| v.as_f64()) {
-            store.set_terminal_line_spacing(spacing as f32);
-        }
-        if let Some(padding) = value.get("padding").and_then(|v| v.as_bool()) {
-            store.set_terminal_padding(padding);
-        }
-        if let Some(bold) = value.get("bold").and_then(|v| v.as_bool()) {
-            store.set_terminal_bold(bold);
-        }
-        if let Some(follow) = value.get("sftp_follow_cd").and_then(|v| v.as_bool()) {
-            store.set_sftp_follow_cd(follow);
-        }
-        if let Some(dir) = value.get("download_dir").and_then(|v| v.as_str()) {
-            store.set_download_dir(dir.to_string());
-        }
-        store.save().map_err(|e| format!("save failed: {e}"))?;
-        Ok(())
+        let revision = match expected {
+            Some(revision) => revision,
+            None => store.settings_get()
+                .map_err(|_| ("settings_update_failed", "settings unavailable".into()))?.revision,
+        };
+        store.settings_update(patch, &revision).map_err(|_| (
+            "settings_update_failed",
+            "Settings were not saved. Keep pending edits, reload the selected profile and retry.".into(),
+        ))
     })();
     match result {
-        Ok(()) => to_c(serde_json::json!({"ok": true}).to_string()),
-        Err(error) => to_c(serde_json::json!({"ok": false, "error": error}).to_string()),
+        Ok(settings) => to_c(serde_json::json!({"ok": true, "settings": settings}).to_string()),
+        Err((code, error)) => to_c(serde_json::json!({"ok": false, "code": code, "error": error}).to_string()),
     }
 }
 

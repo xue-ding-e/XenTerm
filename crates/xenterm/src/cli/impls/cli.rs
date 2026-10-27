@@ -17,6 +17,10 @@ pub fn run(args: &[String]) -> Result<()> {
     let command = CliCommand::parse(Some(command_name))
         .ok_or_else(|| anyhow!("unknown CLI command: {command_name}"))?;
     let value = match command {
+        CliCommand::Settings => {
+            let (tool, arguments) = settings_arguments(&args[3..])?;
+            runtime.block_on(call_cli(tool, &arguments))?
+        }
         CliCommand::Export => {
             let path = args
                 .get(3)
@@ -247,6 +251,22 @@ fn permissions_mode(args: &[String]) -> Result<Option<crate::config::McpAccessMo
     }
 }
 
+fn settings_arguments(args: &[String]) -> Result<(&'static str, Value)> {
+    let usage = "usage: xenterm --data-dir <profile> cli settings get [--json] | settings set '<patch-json>' --expected-revision <revision> [--json]";
+    // Only the trailing local --json flag is stripped. Text inside a JSON
+    // patch is never interpreted as a CLI option.
+    let args = if args.last().is_some_and(|v| v == "--json") { &args[..args.len()-1] } else { args };
+    match args {
+        [get] if get == "get" => Ok(("get_settings", json!({}))),
+        [set, patch, option, revision] if set == "set" && option == "--expected-revision" => {
+            let value: Value = serde_json::from_str(patch)
+                .map_err(|_| anyhow!("settings patch must be valid JSON"))?;
+            Ok(("update_settings", json!({"patch": value, "expected_revision": revision})))
+        }
+        _ => Err(anyhow!(usage)),
+    }
+}
+
 /// A remote program's flags after `--` must never change local CLI behavior.
 fn local_options(command: CliCommand, args: &[String]) -> &[String] {
     if command == CliCommand::Exec {
@@ -346,7 +366,7 @@ fn print_human(command: CliCommand, value: &Value) {
                 }
             }
         }
-        CliCommand::Permissions | CliCommand::Session => println!(
+        CliCommand::Permissions | CliCommand::Session | CliCommand::Settings => println!(
             "{}",
             serde_json::to_string_pretty(value).unwrap_or_default()
         ),
@@ -401,6 +421,8 @@ fn print_help() {
            xenterm cli import <export.json> [--dry-run] [--preserve-ids] [--json]\n\
            xenterm cli sync-native <sessions.json> [--dry-run] [--json]\n\
            xenterm cli permissions [restricted|full] [--json]\n\
+           xenterm --data-dir <profile> cli settings get [--json]\n\
+           xenterm --data-dir <profile> cli settings set '<patch-json>' --expected-revision <revision> [--json]\n\
            xenterm cli sessions [--group <name>] [--json]\n\
            xenterm cli session <session-id> [--json]\n\
            xenterm cli exec <session-id> [--timeout <seconds>] [--json] -- <command>\n\
@@ -414,6 +436,24 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_cli_requires_unambiguous_get_or_revision_checked_patch() {
+        assert_eq!(CliCommand::parse(Some("settings")), Some(CliCommand::Settings));
+        let args = ["set", "{\"font_size\":18}", "--expected-revision", "opaque", "--json"].map(String::from);
+        let (name, value) = settings_arguments(&args).unwrap();
+        assert_eq!(name, "update_settings");
+        assert_eq!(value["patch"]["font_size"], 18);
+        assert_eq!(value["expected_revision"], "opaque");
+        assert_eq!(settings_arguments(&["get".into(), "--json".into()]).unwrap().0, "get_settings");
+        for args in [
+            vec![], vec!["get", "unexpected"], vec!["set", "{}"],
+            vec!["set", "bad-json", "--expected-revision", "r"],
+            vec!["set", "{}", "--expected-revision", "r", "--force"],
+        ] {
+            assert!(settings_arguments(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
+        }
+    }
 
     #[test]
     fn permissions_arguments_reject_unknown_or_ambiguous_modes() {
