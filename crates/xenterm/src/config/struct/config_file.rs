@@ -133,7 +133,7 @@ pub struct ConfigFile {
     #[serde(default)]
     pub font_size: u32,
     /// Flutter interface font; independent of terminal font, panel zoom and UI scale.
-    /// Empty = platform default. These additive fields do not reinterpret GPUI settings.
+    /// Empty = platform default. These additive fields preserve existing shell settings.
     #[serde(default)]
     pub ui_font_family: String,
     /// Interface font size in logical pixels. 0 = the built-in default (14).
