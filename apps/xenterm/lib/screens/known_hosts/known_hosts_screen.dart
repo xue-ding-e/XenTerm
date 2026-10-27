@@ -3,6 +3,7 @@
 /// fixture rows.
 library;
 
+import 'package:flutter/services.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 import '../../bridge/native_bridge.dart';
@@ -10,7 +11,6 @@ import '../../l10n/app_language.dart';
 import '../../theme/app_field.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/primitives.dart';
-import '../../widgets/toolbar.dart';
 
 typedef KnownHostLoader = Future<List<KnownHost>> Function();
 typedef KnownHostDeleter = Future<CoreWriteResult> Function(String id);
@@ -28,8 +28,11 @@ class KnownHostsScreen extends StatefulWidget {
 class _KnownHostsScreenState extends State<KnownHostsScreen> {
   List<KnownHost> _hosts = const [];
   bool _loading = true;
+  bool _reloadInFlight = false;
   String? _error;
-  bool _searching = false;
+  String? _notice;
+  String? _confirming;
+  String? _removing;
   String _query = '';
   final TextEditingController _search = TextEditingController();
 
@@ -46,6 +49,10 @@ class _KnownHostsScreenState extends State<KnownHostsScreen> {
   }
 
   Future<void> _reload({bool silent = false}) async {
+    // Guard the operation, not just the next rendered button state: two
+    // activations in the same frame must not race and publish stale results.
+    if (_reloadInFlight) return;
+    _reloadInFlight = true;
     if (!silent) {
       setState(() {
         _loading = true;
@@ -66,23 +73,47 @@ class _KnownHostsScreenState extends State<KnownHostsScreen> {
         _loading = false;
         _error = error is NativeBridgeError ? error.message : '$error';
       });
+    } finally {
+      _reloadInFlight = false;
     }
   }
 
   Future<void> _remove(KnownHost host) async {
+    // The confirmation stays visible while the core is writing. A second
+    // activation must not issue another delete, including before the next frame.
+    if (_removing != null || _confirming != host.id) return;
+    setState(() {
+      _removing = host.id;
+      _error = null;
+      _notice = null;
+    });
     try {
-      final result = await (widget.deleteHost ?? deleteKnownHostFromCore)(
-        host.id,
-      );
+      final result = await (widget.deleteHost ?? deleteKnownHostFromCore)(host.id);
+      if (!mounted) return;
       if (!result.ok) {
-        if (!mounted) return;
         setState(() => _error = result.error ?? 'Could not remove the key');
         return;
       }
+      setState(() {
+        _confirming = null;
+        _hosts = _hosts.where((entry) => entry.id != host.id).toList();
+      });
       await _reload(silent: true);
     } catch (error) {
       if (!mounted) return;
       setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _removing = null);
+    }
+  }
+
+  Future<void> _copy(String value) async {
+    try {
+      // Copy the original data, never the abbreviated display text.
+      await Clipboard.setData(ClipboardData(text: value));
+      if (mounted) setState(() => _notice = 'Copied');
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
     }
   }
 
@@ -102,216 +133,254 @@ class _KnownHostsScreenState extends State<KnownHostsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-          child: Row(
+    final hosts = _filtered;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Spacer(),
               Row(
                 children: [
-                  IconToggleButton(
-                    icon: LucideIcons.search,
-                    onPressed: () => setState(() {
-                      _searching = !_searching;
-                      if (!_searching) {
-                        _search.clear();
-                        _query = '';
-                      }
-                    }),
+                  Expanded(
+                    child: Text(
+                      AppLanguage.tr(context, 'Known Hosts'),
+                      style: theme.typography.bold.copyWith(fontSize: 18),
+                    ),
                   ),
-                  const SizedBox(width: 6),
-                  IconToggleButton(
+                  const SizedBox(width: 8),
+                  _KnownHostAction(
+                    key: const ValueKey('known-host-refresh'),
                     icon: LucideIcons.refreshCw,
-                    onPressed: () => _reload(),
+                    label: AppLanguage.tr(context, 'Refresh'),
+                    onPressed: _loading || _confirming != null || _removing != null
+                        ? null
+                        : () => _reload(),
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
+              Text(
+                AppLanguage.tr(context, '{shown} of {total} known hosts', {
+                  'shown': hosts.length,
+                  'total': _hosts.length,
+                }),
+                key: const ValueKey('known-host-count'),
+                style: TextStyle(color: XtColors.textTertiary(context)),
+              ),
+              const SizedBox(height: 12),
+              XtField(
+                key: const ValueKey('known-host-search'),
+                controller: _search,
+                onChanged: (value) => setState(() {
+                  _query = value;
+                  if (_removing == null) _confirming = null;
+                }),
+                placeholder: AppLanguage.tr(context, 'Search known hosts'),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  AppLanguage.tr(context, _error!),
+                  key: const ValueKey('known-host-error'),
+                  style: TextStyle(color: XtColors.danger(context)),
+                ),
+              ],
+              if (_notice != null) ...[
+                const SizedBox(height: 8),
+                Text(AppLanguage.tr(context, _notice!)),
+              ],
+              const SizedBox(height: 12),
+              Expanded(child: _body(hosts)),
             ],
           ),
         ),
-        if (_searching)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: XtField(
-              key: const ValueKey('known-host-search'),
-              controller: _search,
-              autofocus: true,
-              onChanged: (value) => setState(() => _query = value),
-              placeholder: AppLanguage.tr(context, 'Search known hosts'),
-            ),
-          ),
-        SectionTitle(text: AppLanguage.tr(context, 'Known Hosts')),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 760),
-              child: _body(theme),
-            ),
-          ),
-        ),
-      ],
+      ),
     );
   }
 
-  Widget _body(ThemeData theme) {
+  Widget _body(List<KnownHost> hosts) {
     if (_loading) {
-      return Padding(
-        padding: const EdgeInsets.all(32),
-        child: Center(
-          child: Text(
-            AppLanguage.tr(context, 'Loading known hosts…'),
-            style: TextStyle(color: XtColors.textTertiary(context)),
-          ),
+      return Center(child: Text(AppLanguage.tr(context, 'Loading known hosts…')));
+    }
+    if (hosts.isEmpty && _error != null) {
+      return Center(
+        child: _KnownHostAction(
+          label: AppLanguage.tr(context, 'Retry'),
+          onPressed: () => _reload(),
         ),
       );
     }
-    if (_error != null) {
-      return Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          children: [
-            Text(
-              AppLanguage.tr(context, _error!),
-              textAlign: TextAlign.center,
-              style: TextStyle(color: XtColors.danger(context)),
-            ),
-            const SizedBox(height: 12),
-            XtActionButton(
-              label: AppLanguage.tr(context, 'Retry'),
-              variant: XtActionVariant.secondary,
-              onPressed: () => _reload(),
-            ),
-          ],
-        ),
-      );
-    }
-    final hosts = _filtered;
     if (hosts.isEmpty) {
-      return XtEmptyState(
-        icon: LucideIcons.fingerprint,
-        title: AppLanguage.tr(
-          context,
-          _hosts.isEmpty ? 'No known hosts yet' : 'No matches',
-        ),
-        message: AppLanguage.tr(
-          context,
-          _hosts.isEmpty
-              ? 'Host keys are remembered after you accept them on connect.'
-              : 'Try a different search.',
+      return SingleChildScrollView(
+        child: XtEmptyState(
+          icon: LucideIcons.fingerprint,
+          title: AppLanguage.tr(
+            context,
+            _hosts.isEmpty ? 'No known hosts yet' : 'No matches',
+          ),
+          message: AppLanguage.tr(
+            context,
+            _hosts.isEmpty
+                ? 'Host keys are remembered after you accept them on connect.'
+                : 'Try a different search.',
+          ),
         ),
       );
     }
-    return Column(
-      children: [
-        for (final host in hosts)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: KnownHostCard(host: host, onRemove: () => _remove(host)),
-          ),
-      ],
+    return ListView.separated(
+      key: const ValueKey('known-host-list'),
+      padding: const EdgeInsets.only(bottom: 16),
+      itemCount: hosts.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final host = hosts[index];
+        return KnownHostCard(
+          key: ValueKey(host.id),
+          host: host,
+          confirming: _confirming == host.id,
+          busy: _removing != null,
+          onRemove: () => setState(() {
+            _confirming = host.id;
+            _notice = null;
+          }),
+          onCancel: () => setState(() => _confirming = null),
+          onConfirm: () => _remove(host),
+          onCopyAddress: () => _copy(host.id),
+          onCopyFingerprint: () => _copy(host.fingerprint),
+        );
+      },
     );
   }
 }
 
-class KnownHostCard extends StatefulWidget {
+class KnownHostCard extends StatelessWidget {
   final KnownHost host;
   final VoidCallback onRemove;
+  final bool confirming;
+  final bool busy;
+  final VoidCallback? onCancel;
+  final VoidCallback? onConfirm;
+  final VoidCallback? onCopyAddress;
+  final VoidCallback? onCopyFingerprint;
 
-  const KnownHostCard({super.key, required this.host, required this.onRemove});
-
-  @override
-  State<KnownHostCard> createState() => _KnownHostCardState();
-}
-
-class _KnownHostCardState extends State<KnownHostCard> {
-  bool _hover = false;
+  const KnownHostCard({
+    super.key,
+    required this.host,
+    required this.onRemove,
+    this.confirming = false,
+    this.busy = false,
+    this.onCancel,
+    this.onConfirm,
+    this.onCopyAddress,
+    this.onCopyFingerprint,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final fingerprint = widget.host.fingerprint.isEmpty
+    final fingerprint = host.fingerprint.isEmpty
         ? AppLanguage.tr(context, 'unreadable key entry')
-        : widget.host.fingerprint;
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: SizedBox(
-        height: 76,
-        child: XtCard(
-          key: ValueKey('known-host-${widget.host.id}'),
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          radius: XtRadius.cardLarge,
-          interactive: true,
-          child: Row(
+        : host.fingerprint;
+    return XtCard(
+      key: ValueKey('known-host-${host.id}'),
+      padding: const EdgeInsets.all(14),
+      radius: XtRadius.cardLarge,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
             children: [
-              Container(
-                width: 44,
-                height: 44,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: XtColors.sunken(context),
-                  borderRadius: BorderRadius.circular(XtRadius.menu),
-                ),
-                child: Icon(
-                  LucideIcons.shieldCheck,
-                  size: 20,
-                  color: XtColors.textPrimary(context),
-                ),
-              ),
-              const SizedBox(width: 14),
+              Icon(LucideIcons.shieldCheck, size: 20),
+              const SizedBox(width: 8),
               Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            widget.host.id,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.typography.semiBold.copyWith(
-                              fontSize: 15,
-                              color: XtColors.textPrimary(context),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        XtBadge(label: _algorithmLabel(widget.host.keyType)),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      fingerprint,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: 'Consolas',
-                        fontFamilyFallback: const ['Menlo', 'Courier New'],
-                        fontSize: 12,
-                        color: XtColors.textSecondary(context),
-                      ),
-                    ),
-                  ],
+                child: Text(
+                  host.id,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.typography.semiBold.copyWith(fontSize: 15),
                 ),
               ),
-              if (_hover)
-                XtActionButton(
-                  key: ValueKey('known-host-remove-${widget.host.id}'),
-                  icon: LucideIcons.trash2,
-                  variant: XtActionVariant.danger,
-                  tooltip: AppLanguage.tr(context, 'Forget this key'),
-                  height: 30,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  onPressed: widget.onRemove,
-                ),
             ],
           ),
-        ),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: XtBadge(label: _algorithmLabel(host.keyType)),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            fingerprint,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontFamily: 'Consolas',
+              fontFamilyFallback: const ['Menlo', 'Courier New'],
+              fontSize: 12,
+              color: XtColors.textSecondary(context),
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (confirming) ...[
+            Text(
+              AppLanguage.tr(
+                context,
+                'Forget the remembered key for “{host}”? Verify the server key again before accepting it on the next connection.',
+                {'host': host.id},
+              ),
+              key: ValueKey('known-host-confirmation-${host.id}'),
+              style: TextStyle(color: XtColors.dangerText(context)),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                _KnownHostAction(
+                  key: ValueKey('known-host-cancel-${host.id}'),
+                  label: AppLanguage.tr(context, 'Cancel'),
+                  autofocus: true,
+                  onPressed: busy ? null : onCancel,
+                ),
+                _KnownHostAction(
+                  key: ValueKey('known-host-confirm-${host.id}'),
+                  icon: LucideIcons.trash2,
+                  label: AppLanguage.tr(context, busy ? 'Removing…' : 'Forget this key'),
+                  variant: XtActionVariant.danger,
+                  onPressed: busy ? null : onConfirm,
+                ),
+              ],
+            ),
+          ] else
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                _KnownHostAction(
+                  key: ValueKey('known-host-copy-address-${host.id}'),
+                  icon: LucideIcons.copy,
+                  label: AppLanguage.tr(context, 'Copy address'),
+                  onPressed: onCopyAddress,
+                ),
+                _KnownHostAction(
+                  key: ValueKey('known-host-copy-fingerprint-${host.id}'),
+                  icon: LucideIcons.copy,
+                  label: AppLanguage.tr(context, 'Copy fingerprint'),
+                  onPressed: host.fingerprint.isEmpty ? null : onCopyFingerprint,
+                ),
+                _KnownHostAction(
+                  key: ValueKey('known-host-remove-${host.id}'),
+                  icon: LucideIcons.trash2,
+                  label: AppLanguage.tr(context, 'Forget this key'),
+                  variant: XtActionVariant.danger,
+                  onPressed: busy ? null : onRemove,
+                ),
+              ],
+            ),
+        ],
       ),
     );
   }
@@ -322,5 +391,78 @@ class _KnownHostCardState extends State<KnownHostCard> {
     if (lower.contains('rsa')) return 'RSA';
     if (lower.contains('ecdsa')) return 'ECDSA';
     return type.isEmpty ? 'KEY' : type.toUpperCase();
+  }
+}
+
+/// Keep the existing action appearance, but make this page's always-visible
+/// actions reachable by Tab and activatable with Enter/Space as well as mouse.
+class _KnownHostAction extends StatefulWidget {
+  final IconData? icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final XtActionVariant variant;
+  final bool autofocus;
+
+  const _KnownHostAction({
+    super.key,
+    this.icon,
+    required this.label,
+    this.onPressed,
+    this.variant = XtActionVariant.ghost,
+    this.autofocus = false,
+  });
+
+  @override
+  State<_KnownHostAction> createState() => _KnownHostActionState();
+}
+
+class _KnownHostActionState extends State<_KnownHostAction> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableActionDetector(
+      enabled: widget.onPressed != null,
+      autofocus: widget.autofocus,
+      onShowFocusHighlight: (focused) => setState(() => _focused = focused),
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.enter, includeRepeats: false):
+            ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.space, includeRepeats: false):
+            ActivateIntent(),
+      },
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            widget.onPressed?.call();
+            return null;
+          },
+        ),
+      },
+      child: Semantics(
+        button: true,
+        enabled: widget.onPressed != null,
+        label: widget.label,
+        onTap: widget.onPressed,
+        child: ExcludeSemantics(
+          child: DecoratedBox(
+            position: DecorationPosition.foreground,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(XtRadius.card),
+              border: Border.all(
+                color: _focused ? XtColors.accent(context) : Colors.transparent,
+                width: 2,
+              ),
+            ),
+            child: XtActionButton(
+              icon: widget.icon,
+              label: widget.label,
+              variant: widget.variant,
+              onPressed: widget.onPressed,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
