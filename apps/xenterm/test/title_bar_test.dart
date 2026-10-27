@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' as foundation;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
@@ -39,14 +39,12 @@ void main() {
   });
 
   tearDown(() {
-    debugDefaultTargetPlatformOverride = null;
     binding.defaultBinaryMessenger.setMockMethodCallHandler(_windowChannel, null);
   });
 
   testWidgets('macOS leaves window controls and gestures to its native bar', (
     tester,
   ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     await _pumpBar(tester, const TitleBar());
 
     // This assertion also runs against the old TitleBar API: it fails because
@@ -64,17 +62,16 @@ void main() {
     await tester.dragFrom(blank, const Offset(40, 0));
     await tester.pumpAndSettle();
     expect(calls, isEmpty);
-  });
+  }, variant: TargetPlatformVariant.only(foundation.TargetPlatform.macOS));
 
   for (final platform in [
-    TargetPlatform.macOS,
-    TargetPlatform.windows,
-    TargetPlatform.linux,
+    foundation.TargetPlatform.macOS,
+    foundation.TargetPlatform.windows,
+    foundation.TargetPlatform.linux,
   ]) {
     testWidgets('$platform tab actions do not drag or maximize the window', (
       tester,
     ) async {
-      debugDefaultTargetPlatformOverride = platform;
       final actions = <String>[];
       await _pumpBar(
         tester,
@@ -100,12 +97,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(calls, isEmpty);
       expect(tester.takeException(), isNull);
-    });
+    }, variant: TargetPlatformVariant.only(platform));
   }
 
-  for (final platform in [TargetPlatform.windows, TargetPlatform.linux]) {
+  for (final platform in [foundation.TargetPlatform.windows, foundation.TargetPlatform.linux]) {
     testWidgets('$platform retains its custom window controls', (tester) async {
-      debugDefaultTargetPlatformOverride = platform;
       await _pumpBar(tester, const TitleBar());
       expect(find.byType(DragToMoveArea), findsOneWidget);
 
@@ -125,12 +121,11 @@ void main() {
         'unmaximize',
         'close',
       ]);
-    });
+    }, variant: TargetPlatformVariant.only(platform));
 
     testWidgets('$platform blank strip retains dragging and double-click', (
       tester,
     ) async {
-      debugDefaultTargetPlatformOverride = platform;
       await _pumpBar(tester, const TitleBar());
       const blank = Offset(500, 25);
       await tester.dragFrom(blank, const Offset(40, 0));
@@ -143,6 +138,6 @@ void main() {
       await tester.tapAt(blank);
       await tester.pumpAndSettle();
       expect(calls, ['isMaximized', 'maximize']);
-    });
+    }, variant: TargetPlatformVariant.only(platform));
   }
 }
