@@ -15,7 +15,7 @@ class _CopySession implements TerminalSession {
   Map<String, dynamic> snapshot() => {
     'cols': 8, 'rowCount': 1,
     'rows': [{'text': 'abcdef  ', 'cellOffsets': [0, 1, 2, 3, 4, 5, 6, 7, 8],
-      'wrapped': false, 'runs': [{'t': 'abcdef  ', 'c': 8, 's': {}}]}],
+      'wrapped': false, 'runs': [{'t': 'abcdef  ', 'c': 8, 's': <String, dynamic>{}}]}],
   };
   @override
   bool send(List<int> bytes) => true;

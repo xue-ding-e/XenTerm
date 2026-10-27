@@ -23,7 +23,7 @@ class _Session implements TerminalSession {
   Map<String, dynamic> frame = {
     'rows': [
       {'text': 'abcdef  ', 'cellOffsets': [0, 1, 2, 3, 4, 5, 6, 7, 8],
-       'wrapped': false, 'runs': [{'t': 'abcdef  ', 'c': 8, 's': {}}]},
+       'wrapped': false, 'runs': [{'t': 'abcdef  ', 'c': 8, 's': <String, dynamic>{}}]},
     ],
     'cols': 8,
     'rowCount': 1,
@@ -399,7 +399,7 @@ void main() {
     await _select(tester);
     session.frame = {...session.frame, 'rows': [
       {'text': 'changed ', 'cellOffsets': [0, 1, 2, 3, 4, 5, 6, 7, 8],
-       'wrapped': false, 'runs': [{'t': 'changed ', 'c': 8, 's': {}}]},
+       'wrapped': false, 'runs': [{'t': 'changed ', 'c': 8, 's': <String, dynamic>{}}]},
     ]};
     session.currentVersion++;
     await tester.pump(const Duration(milliseconds: 250));
