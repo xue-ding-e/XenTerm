@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
@@ -15,22 +16,27 @@ Future<void> main() async {
   await fonts.load();
   await windowManager.ensureInitialized();
 
-  // The shell draws its own titlebar (session tabs live in it), so the native
-  // frame is hidden; dragging is re-provided by the shell's drag region and
-  // the platform's resize borders stay active.
-  const options = WindowOptions(
-    title: 'XenTerm',
-    titleBarStyle: TitleBarStyle.hidden,
-    minimumSize: Size(940, 600),
-    backgroundColor: Colors.transparent,
-  );
-  await windowManager.waitUntilReadyToShow(options, () async {
+  await windowManager.waitUntilReadyToShow(desktopWindowOptions, () async {
     await windowManager.show();
     await windowManager.focus();
   });
 
   runApp(XenTermApp(fonts: fonts));
 }
+
+// AppKit owns the macOS titlebar and its traffic-light hit targets. Keeping
+// Flutter out of the full-size content view lets the native window reserve the
+// correct area, including after resize/full-screen transitions. Other desktop
+// platforms keep the shell's custom frame, drag region and resize borders.
+WindowOptions get desktopWindowOptions => WindowOptions(
+  title: 'XenTerm',
+  titleBarStyle: defaultTargetPlatform == TargetPlatform.macOS
+      ? TitleBarStyle.normal
+      : TitleBarStyle.hidden,
+  windowButtonVisibility: true,
+  minimumSize: const Size(940, 600),
+  backgroundColor: Colors.transparent,
+);
 
 class XenTermApp extends StatefulWidget {
   final AppFonts? fonts;

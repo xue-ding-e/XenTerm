@@ -1,12 +1,13 @@
-/// The custom titlebar: a 50px tab strip where the WHOLE bar is a drag
-/// surface (window_manager's DragToMoveArea), with the tabs, pills and window
-/// controls as interactive children on top of it.
+/// The 50px session tab strip. macOS keeps its native titlebar above it;
+/// other desktop platforms use the strip as their custom window frame.
 ///
-/// Two sibling layers, not a wrapper: the drag/double-click surface sits
-/// behind the interactive row so a pill click never waits for the double-tap
-/// timeout.
+/// On a custom frame there are two sibling layers, not a wrapper: the
+/// drag/double-click surface sits behind the interactive row so a pill click
+/// never waits for the double-tap timeout. AppKit owns window gestures and
+/// controls on macOS, outside Flutter's content/hit-test area.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -41,26 +42,30 @@ class TitleBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final nativeTitleBar = defaultTargetPlatform == TargetPlatform.macOS;
+    final background = ColoredBox(
+      color: xtTitleBarColor(Theme.of(context).brightness),
+    );
     return SizedBox(
       height: 50,
       child: Stack(
         children: [
           Positioned.fill(
-            child: DragToMoveArea(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onDoubleTap: () async {
-                  if (await windowManager.isMaximized()) {
-                    await windowManager.unmaximize();
-                  } else {
-                    await windowManager.maximize();
-                  }
-                },
-                child: ColoredBox(
-                  color: xtTitleBarColor(Theme.of(context).brightness),
-                ),
-              ),
-            ),
+            child: nativeTitleBar
+                ? background
+                : DragToMoveArea(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onDoubleTap: () async {
+                        if (await windowManager.isMaximized()) {
+                          await windowManager.unmaximize();
+                        } else {
+                          await windowManager.maximize();
+                        }
+                      },
+                      child: background,
+                    ),
+                  ),
           ),
           Padding(
             padding: const EdgeInsets.only(left: 10),
@@ -103,7 +108,8 @@ class TitleBar extends StatelessWidget {
                   onPressed: onNewTab ?? () {},
                 ),
                 const Spacer(),
-                const _WindowControls(),
+                if (!nativeTitleBar)
+                  const _WindowControls(),
               ],
             ),
           ),
@@ -260,7 +266,7 @@ class _SftpPillState extends State<_SftpPill> {
   }
 }
 
-/// min / max / close, the Windows trio, drawn — the native frame is hidden.
+/// min / max / close for platforms where the native frame is hidden.
 class _WindowControls extends StatelessWidget {
   const _WindowControls();
 
