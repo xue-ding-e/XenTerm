@@ -64,6 +64,9 @@ const _quietTicksBeforeBackoff = 10;
 /// The tools panel only redraws on this cadence (4 Hz) at most.
 const _panelRefresh = Duration(milliseconds: 250);
 
+/// Reflow the PTY at most once per output frame during a live window drag.
+const _resizeInterval = _activePoll;
+
 String _terminalFontFamily(AppFonts fonts) {
   if (fonts.terminalFamily.isNotEmpty) return fonts.terminalFamily;
   if (Platform.isWindows) return 'Consolas';
@@ -213,6 +216,11 @@ class _TerminalViewState extends State<TerminalView>
   TerminalSession? _session;
   Timer? _poll;
   bool _pollFast = false;
+  Timer? _resizeTimer;
+  int _desiredCols = 0;
+  int _desiredRows = 0;
+  int _cols = 0;
+  int _rows = 0;
 
   /// Whether the app window is foreground/resumed (lifecycle observer).
   bool _foreground = true;
@@ -276,6 +284,11 @@ class _TerminalViewState extends State<TerminalView>
   }
 
   void _start() {
+    _cancelResize();
+    // A new PTY starts at 80x24 even when the widget's layout did not change.
+    // Keep the desired size, but never reuse another session's applied size.
+    _cols = 0;
+    _rows = 0;
     try {
       final session = (widget.sessionStarter ?? _startNative)();
       setState(() {
@@ -287,6 +300,7 @@ class _TerminalViewState extends State<TerminalView>
         _lastVersion = 0;
       });
       _frame.value = null;
+      _syncResize(immediate: true);
       _syncPolling();
       _focus.requestFocus();
     } catch (error) {
@@ -396,6 +410,7 @@ class _TerminalViewState extends State<TerminalView>
         _closed = closed;
         _status = nextStatus;
       });
+      _syncResize();
     }
     _publishPanel();
   }
@@ -461,6 +476,7 @@ class _TerminalViewState extends State<TerminalView>
     if (foreground == _foreground) return;
     _foreground = foreground;
     if (!foreground) _dismissClipboard(restoreFocus: false);
+    _syncResize(immediate: foreground);
     _syncPolling();
   }
 
@@ -469,6 +485,7 @@ class _TerminalViewState extends State<TerminalView>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.active != widget.active) {
       if (!widget.active) _dismissClipboard(restoreFocus: false);
+      _syncResize(immediate: widget.active);
       _syncPolling();
     }
     if (oldWidget.commandBus != widget.commandBus) {
@@ -488,6 +505,7 @@ class _TerminalViewState extends State<TerminalView>
     HardwareKeyboard.instance.removeHandler(_globalKey);
     WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
+    _cancelResize();
     _session?.close();
     _clipboardGeneration++;
     _selection.dispose();
@@ -507,14 +525,58 @@ class _TerminalViewState extends State<TerminalView>
   }
 
   void _resize(int cols, int rows) {
-    if (cols == _cols && rows == _rows) return;
-    _cols = cols;
-    _rows = rows;
-    _session?.resize(cols, rows);
+    _desiredCols = cols;
+    _desiredRows = rows;
+    _syncResize();
   }
 
-  int _cols = 0;
-  int _rows = 0;
+  void _cancelResize() {
+    _resizeTimer?.cancel();
+    _resizeTimer = null;
+  }
+
+  void _syncResize({bool immediate = false}) {
+    final session = _session;
+    if (!widget.active || !_foreground || _closed || _error != null ||
+        session == null || _desiredCols == 0 || _desiredRows == 0 ||
+        (_desiredCols == _cols && _desiredRows == _rows)) {
+      _cancelResize();
+      return;
+    }
+    if (immediate) _cancelResize();
+    if (_resizeTimer != null) return;
+    // FFI resize locks and reflows the native terminal. Never do that during
+    // LayoutBuilder, or for every offstage tab on each window-drag step. This
+    // is a trailing throttle, not a debounce: further layouts replace only
+    // the desired size, so continuous dragging cannot starve PTY updates.
+    _resizeTimer = Timer(
+      immediate || _cols == 0 ? Duration.zero : _resizeInterval,
+      () {
+        _resizeTimer = null;
+        if (!mounted || !identical(session, _session) ||
+            !widget.active || !_foreground || _closed || _error != null) {
+          return;
+        }
+        final cols = _desiredCols;
+        final rows = _desiredRows;
+        if (session.resize(cols, rows)) {
+          _cols = cols;
+          _rows = rows;
+          _requestFastPoll();
+        } else {
+          // The bridge returns false only for an unknown session handle, not
+          // a busy PTY. Surface its loss through the existing Retry action;
+          // timer retries would spin forever against the same invalid handle.
+          setState(() {
+            _error = 'xenterm_session_resize: unknown session handle';
+            _closed = true;
+            _status = TerminalSessionStatus.disconnected;
+          });
+          _syncPolling();
+        }
+      },
+    );
+  }
 
   void _answerPrompt(
     int promptId, {
@@ -536,6 +598,7 @@ class _TerminalViewState extends State<TerminalView>
   void _reconnect() {
     _dismissClipboard(restoreFocus: false);
     _selection.value = null;
+    _cancelResize();
     _poll?.cancel();
     _poll = null;
     _pollFast = false;
