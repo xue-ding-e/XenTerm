@@ -111,6 +111,92 @@ impl SessionLog {
     }
 }
 
+/// Result of a clipboard paste request. A review request sends no input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PasteResult {
+    Rejected,
+    Sent,
+    NeedsReview,
+}
+
+fn prepare_terminal_paste(
+    engine: &TerminalEngine,
+    text: &str,
+    confirmed: bool,
+    confirm_multiline: bool,
+) -> Result<Vec<u8>, PasteResult> {
+    if text.is_empty() {
+        return Err(PasteResult::Rejected);
+    }
+    if !confirmed && crate::terminal::paste_needs_review(text, confirm_multiline) {
+        return Err(PasteResult::NeedsReview);
+    }
+    Ok(crate::terminal::encode_pasted_text(text, engine.bracketed_paste()))
+}
+
+/// Renderer rows plus cell-to-UTF-16 boundaries for exact frontend selection.
+/// Wide continuation cells share their glyph's start; a leading spacer at a
+/// soft wrap has no text and must not select the previous glyph.
+fn terminal_rows_json(engine: &TerminalEngine) -> Vec<Value> {
+    let (rows, cols) = engine.size();
+    let mut out_rows = Vec::with_capacity(rows as usize);
+    for row in 0..rows {
+        let mut text = String::new();
+        let mut runs: Vec<Value> = Vec::new();
+        let mut run_text = String::new();
+        let mut run_cells = 0usize;
+        let mut run_style: Option<Value> = None;
+        let mut cell_offsets = Vec::with_capacity(cols as usize + 1);
+        let mut utf16_offset = 0usize;
+        let mut previous_start = 0usize;
+        let mut previous_wide = false;
+        for col in 0..cols {
+            let cell = engine.cell(row, col);
+            if let Some(ref cell) = cell {
+                if cell.is_wide_continuation() {
+                    cell_offsets.push(if previous_wide { previous_start } else { utf16_offset });
+                    previous_wide = false;
+                    continue;
+                }
+            }
+            cell_offsets.push(utf16_offset);
+            previous_start = utf16_offset;
+            let style = cell.as_ref().map(style_json);
+            let contents = cell
+                .as_ref()
+                .map(|cell| cell.contents())
+                .unwrap_or_else(|| " ".to_string());
+            let cells = if cell.as_ref().map(|c| c.is_wide()).unwrap_or(false) {
+                2
+            } else {
+                1
+            };
+            previous_wide = cells == 2;
+            utf16_offset += contents.encode_utf16().count();
+            if run_style.as_ref() != style.as_ref() {
+                if let Some(previous) = run_style.take() {
+                    runs.push(json!({ "t": run_text, "c": run_cells, "s": previous }));
+                }
+                run_style = style;
+                run_text = String::new();
+                run_cells = 0;
+            }
+            run_cells += cells;
+            run_text.push_str(&contents);
+            text.push_str(&contents);
+        }
+        if let Some(previous) = run_style.take() {
+            runs.push(json!({ "t": run_text, "c": run_cells, "s": previous }));
+        }
+        cell_offsets.push(utf16_offset);
+        out_rows.push(json!({
+            "text": text, "runs": runs,
+            "cellOffsets": cell_offsets, "wrapped": engine.row_wrapped(row),
+        }));
+    }
+    out_rows
+}
+
 pub struct TerminalSession {
     handle: SessionHandle,
     engine: Mutex<TerminalEngine>,
@@ -496,47 +582,7 @@ impl TerminalSession {
         };
         let (rows, cols) = engine.size();
         let (cursor_row, cursor_col) = engine.cursor_position();
-        let mut out_rows = Vec::with_capacity(rows as usize);
-        for row in 0..rows {
-            let mut text = String::new();
-            let mut runs: Vec<Value> = Vec::new();
-            let mut run_text = String::new();
-            let mut run_cells = 0usize;
-            let mut run_style: Option<Value> = None;
-            for col in 0..cols {
-                let cell = engine.cell(row, col);
-                if let Some(ref cell) = cell {
-                    if cell.is_wide_continuation() {
-                        continue;
-                    }
-                }
-                let style = cell.as_ref().map(style_json);
-                let contents = cell
-                    .as_ref()
-                    .map(|cell| cell.contents())
-                    .unwrap_or_else(|| " ".to_string());
-                let cells = if cell.as_ref().map(|c| c.is_wide()).unwrap_or(false) {
-                    2
-                } else {
-                    1
-                };
-                if run_style.as_ref() != style.as_ref() {
-                    if let Some(previous) = run_style.take() {
-                        runs.push(json!({ "t": run_text, "c": run_cells, "s": previous }));
-                    }
-                    run_style = style;
-                    run_text = String::new();
-                    run_cells = 0;
-                }
-                run_cells += cells;
-                run_text.push_str(&contents);
-                text.push_str(&contents);
-            }
-            if let Some(previous) = run_style.take() {
-                runs.push(json!({ "t": run_text, "c": run_cells, "s": previous }));
-            }
-            out_rows.push(json!({ "text": text, "runs": runs }));
-        }
+        let out_rows = terminal_rows_json(&engine);
         let prompt = self
             .prompt
             .lock()
@@ -607,6 +653,32 @@ impl TerminalSession {
 
     pub fn send_input(&self, bytes: &[u8]) {
         self.handle.send_raw(bytes.to_vec());
+    }
+
+    /// Review first, then encode against the current engine mode. The UI must
+    /// pass the same immutable text again after an explicit confirmation.
+    pub fn paste_text(
+        &self,
+        text: &str,
+        confirmed: bool,
+        confirm_multiline: bool,
+    ) -> PasteResult {
+        if text.is_empty()
+            || self.closed.lock().map(|closed| closed.is_some()).unwrap_or(true)
+            || self.prompt.lock().map(|prompt| prompt.is_some()).unwrap_or(true)
+        {
+            return PasteResult::Rejected;
+        }
+        let bytes = {
+            let engine = self.engine.lock().unwrap_or_else(|p| p.into_inner());
+            match prepare_terminal_paste(&engine, text, confirmed, confirm_multiline) {
+                Ok(bytes) => bytes,
+                Err(result) => return result,
+            }
+        };
+        // No engine/store lock is held across the synchronous channel send.
+        self.handle.send_raw(bytes);
+        PasteResult::Sent
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -1543,4 +1615,115 @@ pub type SessionRegistry = HashMap<u64, Arc<TerminalSession>>;
 /// Creates a session registry shared behind a mutex.
 pub fn new_registry() -> Arc<Mutex<SessionRegistry>> {
     Arc::new(Mutex::new(SessionRegistry::new()))
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    // Freeze the pre-change renderer projection: the additive selection fields
+    // must not change text, style runs, colours or wide-cell rendering.
+    fn legacy_rows(engine: &TerminalEngine) -> Vec<Value> {
+        let (rows, cols) = engine.size();
+        let mut out_rows = Vec::with_capacity(rows as usize);
+        for row in 0..rows {
+            let mut text = String::new();
+            let mut runs: Vec<Value> = Vec::new();
+            let mut run_text = String::new();
+            let mut run_cells = 0usize;
+            let mut run_style: Option<Value> = None;
+            for col in 0..cols {
+                let cell = engine.cell(row, col);
+                if let Some(ref cell) = cell {
+                    if cell.is_wide_continuation() {
+                        continue;
+                    }
+                }
+                let style = cell.as_ref().map(style_json);
+                let contents = cell
+                    .as_ref()
+                    .map(|cell| cell.contents())
+                    .unwrap_or_else(|| " ".to_string());
+                let cells = if cell.as_ref().map(|c| c.is_wide()).unwrap_or(false) {
+                    2
+                } else {
+                    1
+                };
+                if run_style.as_ref() != style.as_ref() {
+                    if let Some(previous) = run_style.take() {
+                        runs.push(json!({ "t": run_text, "c": run_cells, "s": previous }));
+                    }
+                    run_style = style;
+                    run_text = String::new();
+                    run_cells = 0;
+                }
+                run_cells += cells;
+                run_text.push_str(&contents);
+                text.push_str(&contents);
+            }
+            if let Some(previous) = run_style.take() {
+                runs.push(json!({ "t": run_text, "c": run_cells, "s": previous }));
+            }
+            out_rows.push(json!({ "text": text, "runs": runs }));
+        }
+        out_rows
+    }
+
+    #[test]
+    fn selection_metadata_preserves_the_existing_renderer_projection() {
+        let mut engine = TerminalEngine::new(3, 8, 20);
+        engine.process("ab\x1b[31m中e\u{301}🙂\x1b[0m\r\nnext".as_bytes());
+        let old = legacy_rows(&engine);
+        let mut new = terminal_rows_json(&engine);
+        for row in &mut new {
+            row.as_object_mut().unwrap().remove("cellOffsets");
+            row.as_object_mut().unwrap().remove("wrapped");
+        }
+        assert_eq!(new, old);
+    }
+
+    #[test]
+    fn cell_offsets_cover_wide_emoji_combining_and_a_leading_wrap_spacer() {
+        let mut engine = TerminalEngine::new(2, 6, 20);
+        engine.process("AB中e\u{301}🙂".as_bytes());
+        let rows = terminal_rows_json(&engine);
+        assert_eq!(rows[0]["cellOffsets"], json!([0, 1, 2, 2, 3, 5, 5]));
+        assert_eq!(rows[0]["wrapped"], true);
+        assert_eq!(rows[1]["cellOffsets"], json!([0, 0, 2, 3, 4, 5, 6]));
+        assert!(rows[1]["text"].as_str().unwrap().starts_with('🙂'));
+    }
+
+    #[test]
+    fn cell_metadata_tracks_the_current_rows_after_scroll() {
+        let mut engine = TerminalEngine::new(2, 4, 20);
+        engine.process(b"one\r\ntwo\r\ntri");
+        let rows = terminal_rows_json(&engine);
+        assert_eq!(rows[0]["text"], "two ");
+        assert_eq!(rows[1]["text"], "tri ");
+        assert_eq!(rows[0]["cellOffsets"], json!([0, 1, 2, 3, 4]));
+        assert_eq!(rows[0]["wrapped"], false);
+    }
+
+    #[test]
+    fn paste_review_reuses_the_existing_setting_and_byte_limit() {
+        let engine = TerminalEngine::new(2, 10, 0);
+        assert_eq!(prepare_terminal_paste(&engine, "a\nb", false, true), Err(PasteResult::NeedsReview));
+        assert_eq!(prepare_terminal_paste(&engine, "a\nb", false, false), Ok(b"a\rb".to_vec()));
+        assert_eq!(prepare_terminal_paste(&engine, &"x".repeat(100 * 1024), false, false).unwrap().len(), 100 * 1024);
+        assert_eq!(prepare_terminal_paste(&engine, &"x".repeat(100 * 1024 + 1), false, false), Err(PasteResult::NeedsReview));
+        assert_eq!(prepare_terminal_paste(&engine, &"中".repeat(35000), false, false), Err(PasteResult::NeedsReview));
+        assert_eq!(prepare_terminal_paste(&engine, "", true, true), Err(PasteResult::Rejected));
+    }
+
+    #[test]
+    fn confirmation_uses_the_current_mode_and_shared_escape_filter() {
+        let mut engine = TerminalEngine::new(2, 10, 0);
+        let text = "a\r\nb\n\x1b[201~\x03中";
+        assert_eq!(prepare_terminal_paste(&engine, text, false, true), Err(PasteResult::NeedsReview));
+        // The remote may change its paste mode while the review is visible.
+        engine.process(b"\x1b[?2004h");
+        assert_eq!(prepare_terminal_paste(&engine, text, true, true), Ok("\x1b[200~a\rb\r[201~中\x1b[201~".as_bytes().to_vec()));
+        engine.process(b"\x1b[?2004l");
+        assert_eq!(prepare_terminal_paste(&engine, "x\ny", true, true), Ok(b"x\ry".to_vec()));
+    }
 }

@@ -4,6 +4,15 @@
 /// Keys are the English source strings; `{placeholders}` carry runtime values.
 /// Shared words (Save/Cancel/Delete/Retry/Copy…) stay in `zh_common`.
 const Map<String, String> zhTerminal = <String, String>{
+  // Clipboard review and actions.
+  'Paste': '粘贴',
+  'Clipboard unavailable': '剪贴板不可用',
+  'Review clipboard paste': '确认粘贴内容',
+  'Pasted newlines may run commands. Review before sending.':
+      '粘贴中的换行可能执行命令，请确认后再发送。',
+  'Clipboard paste was not accepted by the session': '会话未接受粘贴内容',
+  'The native bridge rejected paste confirmation': '原生桥接库未接受粘贴确认',
+
   // Connection state and terminal view chrome.
   'Connecting…': '正在连接…',
   'Connected': '已连接',

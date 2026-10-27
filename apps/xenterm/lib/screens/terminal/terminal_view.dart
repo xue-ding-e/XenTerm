@@ -34,6 +34,7 @@ import '../../shell/window_activity.dart';
 import '../../theme/app_fonts.dart';
 import '../../terminal/core_settings.dart';
 import '../../terminal/terminal_command_bus.dart';
+import '../../terminal/terminal_selection.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/primitives.dart';
 import 'connection_prompt.dart';
@@ -82,6 +83,9 @@ abstract interface class TerminalSession {
 
   bool send(List<int> bytes);
 
+  /// Review/encode clipboard text in the core using the current terminal mode.
+  TerminalPasteResult paste(String text, {bool confirmed = false});
+
   bool resize(int cols, int rows);
 
   bool answerPrompt(
@@ -118,6 +122,10 @@ class _NativeTerminalSession implements TerminalSession {
   @override
   bool send(List<int> bytes) =>
       _bridge.sendInput(_handle, Uint8List.fromList(bytes));
+
+  @override
+  TerminalPasteResult paste(String text, {bool confirmed = false}) =>
+      _bridge.pasteText(_handle, text, confirmed: confirmed);
 
   @override
   bool resize(int cols, int rows) => _bridge.resizeSession(_handle, cols, rows);
@@ -229,6 +237,15 @@ class _TerminalViewState extends State<TerminalView>
   double? _cellSize;
   double _cellWidth = 8;
 
+  final ValueNotifier<TerminalSelection?> _selection = ValueNotifier(null);
+  TerminalCellPosition? _selectionAnchor;
+  final OverlayPortalController _clipboardOverlay = OverlayPortalController();
+  Offset? _contextMenuPosition;
+  ({TerminalSession session, String text, int generation})? _pendingPaste;
+  String? _clipboardError;
+  bool _readingClipboard = false;
+  int _clipboardGeneration = 0;
+
   final FocusNode _focus = FocusNode(debugLabel: 'terminal');
   final FocusNode _searchFocus = FocusNode(debugLabel: 'terminal-search');
 
@@ -236,6 +253,7 @@ class _TerminalViewState extends State<TerminalView>
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_globalKey);
+    _focus.addListener(_onTerminalFocusChanged);
     widget.commandBus?.addListener(_onCommand);
     widget.settings?.addListener(_onSettings);
     WidgetsBinding.instance.addObserver(this);
@@ -367,6 +385,13 @@ class _TerminalViewState extends State<TerminalView>
     final parsed = session.snapshot();
     if (parsed == null || !mounted) return;
     _quietTicks = 0;
+    if (_selection.value != null && !sameTerminalSelectionContent(_screen, parsed)) {
+      _selection.value = null;
+      _selectionAnchor = null;
+    }
+    if (parsed['closed'] != null || parsed['prompt'] != null) {
+      _dismissClipboard(restoreFocus: false);
+    }
     _screen = parsed;
     _frame.value = parsed;
     hostOsRegistry.record(widget.host.id, parsed['remoteOs'] as String?);
@@ -443,13 +468,17 @@ class _TerminalViewState extends State<TerminalView>
     final foreground = state == AppLifecycleState.resumed;
     if (foreground == _foreground) return;
     _foreground = foreground;
+    if (!foreground) _dismissClipboard(restoreFocus: false);
     _syncPolling();
   }
 
   @override
   void didUpdateWidget(TerminalView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.active != widget.active) _syncPolling();
+    if (oldWidget.active != widget.active) {
+      if (!widget.active) _dismissClipboard(restoreFocus: false);
+      _syncPolling();
+    }
     if (oldWidget.commandBus != widget.commandBus) {
       oldWidget.commandBus?.removeListener(_onCommand);
       widget.commandBus?.addListener(_onCommand);
@@ -469,8 +498,11 @@ class _TerminalViewState extends State<TerminalView>
     windowActivity.idle.removeListener(_onWindowActivity);
     _poll?.cancel();
     _session?.close();
+    _clipboardGeneration++;
+    _selection.dispose();
     _frame.dispose();
     _tools.dispose();
+    _focus.removeListener(_onTerminalFocusChanged);
     _focus.dispose();
     _searchFocus.dispose();
     super.dispose();
@@ -479,7 +511,7 @@ class _TerminalViewState extends State<TerminalView>
   void _send(List<int> bytes) {
     final session = _session;
     if (session == null || bytes.isEmpty) return;
-    session.send(bytes);
+    if (session.send(bytes)) _selection.value = null;
     _requestFastPoll();
   }
 
@@ -511,6 +543,8 @@ class _TerminalViewState extends State<TerminalView>
   }
 
   void _reconnect() {
+    _dismissClipboard(restoreFocus: false);
+    _selection.value = null;
     _poll?.cancel();
     _poll = null;
     _pollFast = false;
@@ -533,8 +567,31 @@ class _TerminalViewState extends State<TerminalView>
   /// pane's primary focus, so other shortcuts never fire mid-terminal and the
   /// encoding does not depend on the focus chain's event dispatch.
   bool _globalKey(KeyEvent event) {
-    if (!_focus.hasPrimaryFocus) return false;
+    if (!_focus.hasPrimaryFocus || !widget.active || !_foreground) return false;
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+    final keyboard = HardwareKeyboard.instance;
+    final control = keyboard.isControlPressed;
+    final shift = keyboard.isShiftPressed;
+    final meta = keyboard.isMetaPressed;
+    final alt = keyboard.isAltPressed;
+    final mac = defaultTargetPlatform == TargetPlatform.macOS;
+    final plainControl = control && !shift && !meta && !alt;
+    final copyPaste = !alt &&
+        ((mac && meta && !control && !shift) ||
+         (!mac && control && shift && !meta) || plainControl);
+    if (copyPaste && event.logicalKey == LogicalKeyboardKey.keyC) {
+      if (event is KeyRepeatEvent) {
+        final hasSelection = (_selection.value?.text(_screen) ?? '').isNotEmpty;
+        if (!plainControl || hasSelection) return true;
+      } else if (_copySelection() || !plainControl) {
+        return true;
+      }
+      // No selected text: keep Ctrl+C's normal interrupt byte.
+    }
+    if (copyPaste && event.logicalKey == LogicalKeyboardKey.keyV) {
+      if (event is KeyDownEvent) _pasteFromClipboard();
+      return true;
+    }
     if (HardwareKeyboard.instance.isControlPressed &&
         HardwareKeyboard.instance.isShiftPressed &&
         event.logicalKey == LogicalKeyboardKey.keyF) {
@@ -544,6 +601,254 @@ class _TerminalViewState extends State<TerminalView>
     final bytes = _encodeKey(event, _screen?['applicationCursor'] == true);
     if (bytes.isNotEmpty) _send(bytes);
     return true;
+  }
+
+  void _onTerminalFocusChanged() {
+    // Losing and then regaining focus must not revive an old clipboard read.
+    // Moving focus into the review we just opened does not revoke that review.
+    if (!_focus.hasPrimaryFocus && _readingClipboard && _pendingPaste == null) {
+      _clipboardGeneration++;
+    }
+  }
+
+  bool get _canPaste =>
+      _shouldPoll && !_starting && _screen?['prompt'] == null &&
+      _pendingPaste == null && _clipboardError == null;
+
+  void _dismissClipboard({bool restoreFocus = true}) {
+    _clipboardGeneration++;
+    _pendingPaste = null;
+    _contextMenuPosition = null;
+    _clipboardError = null;
+    _clipboardOverlay.hide();
+    if (restoreFocus && widget.active && _foreground) _focus.requestFocus();
+  }
+
+  void _showClipboardError(Object error) {
+    if (!mounted) return;
+    _clipboardGeneration++;
+    setState(() {
+      _contextMenuPosition = null;
+      _pendingPaste = null;
+      _clipboardError = error is NativeBridgeError ? error.message : '$error';
+    });
+    _focus.unfocus();
+    _clipboardOverlay.show();
+  }
+
+  bool _copySelection() {
+    final text = _selection.value?.text(_screen) ?? '';
+    if (text.isEmpty) return false;
+    final generation = ++_clipboardGeneration;
+    final session = _session;
+    Clipboard.setData(ClipboardData(text: text)).catchError((Object error) {
+      if (mounted && generation == _clipboardGeneration && widget.active &&
+          _foreground && identical(session, _session)) {
+        _showClipboardError(error);
+      }
+    });
+    return true;
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    if (!_canPaste || _readingClipboard) return;
+    final session = _session!;
+    final generation = ++_clipboardGeneration;
+    _readingClipboard = true;
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      if (!mounted || generation != _clipboardGeneration ||
+          !identical(session, _session) || !_canPaste ||
+          !_focus.hasPrimaryFocus) return;
+      final text = data?.text;
+      if (text == null || text.isEmpty) return;
+      _submitPaste(session, text, confirmed: false);
+    } catch (error) {
+      if (mounted && generation == _clipboardGeneration) {
+        _showClipboardError(error);
+      }
+    } finally {
+      _readingClipboard = false;
+    }
+  }
+
+  void _submitPaste(
+    TerminalSession session,
+    String text, {
+    required bool confirmed,
+  }) {
+    if (!_canPaste || !identical(session, _session)) return;
+    try {
+      switch (session.paste(text, confirmed: confirmed)) {
+        case TerminalPasteResult.sent:
+          _selection.value = null;
+          _requestFastPoll();
+        case TerminalPasteResult.needsReview:
+          if (confirmed) {
+            throw const NativeBridgeError('The native bridge rejected paste confirmation');
+          }
+          setState(() {
+            _contextMenuPosition = null;
+            _pendingPaste = (session: session, text: text, generation: ++_clipboardGeneration);
+          });
+          _focus.unfocus();
+          _clipboardOverlay.show();
+        case TerminalPasteResult.rejected:
+          throw const NativeBridgeError('Clipboard paste was not accepted by the session');
+      }
+    } catch (error) {
+      _showClipboardError(error);
+    }
+  }
+
+  void _confirmPaste(
+    ({TerminalSession session, String text, int generation}) expected,
+  ) {
+    final pending = _pendingPaste;
+    if (pending == null || pending.generation != expected.generation ||
+        pending.generation != _clipboardGeneration ||
+        !identical(pending.session, expected.session)) return;
+    // Atomically consume this review before sending. Old button callbacks,
+    // repeated activation and callbacks retained across cancellation are inert.
+    _dismissClipboard();
+    _submitPaste(pending.session, pending.text, confirmed: true);
+  }
+
+  void _openClipboardMenu(Offset position) {
+    if (!widget.active || !_foreground) return;
+    _dismissClipboard(restoreFocus: false);
+    setState(() => _contextMenuPosition = position);
+    _focus.unfocus();
+    _clipboardOverlay.show();
+  }
+
+  Widget _clipboardOverlayBuilder(BuildContext context) {
+    final pending = _pendingPaste;
+    final error = _clipboardError;
+    final position = _contextMenuPosition;
+    final copyEnabled = (_selection.value?.text(_screen) ?? '').isNotEmpty;
+    final size = MediaQuery.sizeOf(context);
+    final menu = position != null;
+    return FocusScope(
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): _dismissClipboard,
+        },
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _dismissClipboard,
+                onSecondaryTap: _dismissClipboard,
+                child: ColoredBox(
+                  color: menu ? Colors.transparent : const Color(0x99000000),
+                ),
+              ),
+            ),
+            if (position != null)
+              Positioned(
+                left: position.dx.clamp(0.0, (size.width - 220).clamp(0.0, double.infinity)).toDouble(),
+                top: position.dy.clamp(0.0, (size.height - 100).clamp(0.0, double.infinity)).toDouble(),
+                child: XtMenuPopup(
+                  width: 220,
+                  children: [
+                    _ClipboardAction(
+                      key: const ValueKey('terminal-copy-selection'),
+                      label: AppLanguage.tr(context, 'Copy'),
+                      autofocus: copyEnabled,
+                      onPressed: copyEnabled ? () {
+                        _dismissClipboard();
+                        _copySelection();
+                      } : null,
+                    ),
+                    _ClipboardAction(
+                      key: const ValueKey('terminal-paste'),
+                      label: AppLanguage.tr(context, 'Paste'),
+                      autofocus: !copyEnabled,
+                      onPressed: _canPaste ? () {
+                        _dismissClipboard();
+                        _pasteFromClipboard();
+                      } : null,
+                    ),
+                  ],
+                ),
+              ),
+            if (pending != null || error != null)
+              Center(
+                child: Container(
+                  key: const ValueKey('terminal-paste-review'),
+                  width: (size.width - 32).clamp(0.0, 640.0).toDouble(),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: XtColors.surface(context),
+                    borderRadius: BorderRadius.circular(XtRadius.field),
+                    border: Border.all(color: XtColors.hairline(context)),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(AppLanguage.tr(context, pending == null
+                          ? 'Clipboard unavailable'
+                          : 'Review clipboard paste')),
+                      const SizedBox(height: 12),
+                      if (pending != null) ...[
+                        Text(AppLanguage.tr(context,
+                            'Pasted newlines may run commands. Review before sending.')),
+                        const SizedBox(height: 8),
+                        ConstrainedBox(
+                          constraints: BoxConstraints(maxHeight: size.height * 0.45),
+                          child: SingleChildScrollView(
+                            child: Text(pending.text),
+                          ),
+                        ),
+                      ] else
+                        Text(AppLanguage.tr(context, error!)),
+                      const SizedBox(height: 12),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          _ClipboardAction(
+                            key: const ValueKey('terminal-paste-cancel'),
+                            label: AppLanguage.tr(context, 'Cancel'),
+                            autofocus: true,
+                            onPressed: _dismissClipboard,
+                          ),
+                          if (pending != null) ...[
+                            const SizedBox(width: 8),
+                            _ClipboardAction(
+                              key: const ValueKey('terminal-paste-confirm'),
+                              label: AppLanguage.tr(context, 'Paste'),
+                              onPressed: () => _confirmPaste(pending),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  TerminalCellPosition? _cellAt(
+    Offset position,
+    double inset,
+    double width,
+    double height,
+  ) {
+    final rows = _screen?['rows'];
+    if (rows is! List || rows.isEmpty) return null;
+    final row = ((position.dy - inset) / height).floor().clamp(0, rows.length - 1).toInt();
+    final offsets = (rows[row] as Map)['cellOffsets'];
+    if (offsets is! List || offsets.length < 2) return null;
+    final column = ((position.dx - inset) / width)
+        .floor().clamp(0, offsets.length - 2).toInt();
+    return (row: row, column: column);
   }
 
   /// Measures the cell with the SAME style the painter uses. 'monospace' is
@@ -579,7 +884,10 @@ class _TerminalViewState extends State<TerminalView>
     final lineHeight = fontSize * 1.25 * core.lineSpacing;
     final inset = core.padding ? 12.0 : 0.0;
 
-    return Row(
+    return OverlayPortal(
+      controller: _clipboardOverlay,
+      overlayChildBuilder: _clipboardOverlayBuilder,
+      child: Row(
       children: [
         Expanded(
           child: Container(
@@ -597,11 +905,9 @@ class _TerminalViewState extends State<TerminalView>
                 return Focus(
                   focusNode: _focus,
                   autofocus: true,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: _focus.requestFocus,
-                    child: _TerminalCanvas(
+                  child: _TerminalCanvas(
                       frame: _frame,
+                      selection: _selection,
                       search: _search,
                       starting: _starting,
                       error: _error,
@@ -614,7 +920,34 @@ class _TerminalViewState extends State<TerminalView>
                       inset: inset,
                       onReconnect: _reconnect,
                       onAnswerPrompt: _answerPrompt,
-                    ),
+                      interactionBuilder: (child) => GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      _selection.value = null;
+                      _focus.requestFocus();
+                    },
+                    onPanDown: (details) {
+                      _focus.requestFocus();
+                      _selectionAnchor = _cellAt(details.localPosition, inset, cellWidth, lineHeight);
+                      _selection.value = null;
+                    },
+                    onPanUpdate: (details) {
+                      final anchor = _selectionAnchor;
+                      final extent = _cellAt(details.localPosition, inset, cellWidth, lineHeight);
+                      if (anchor != null && extent != null) {
+                        _selection.value = TerminalSelection(anchor, extent);
+                      }
+                    },
+                    onPanEnd: (_) {
+                      _selectionAnchor = null;
+                      // A drag that predates a menu/review must not revoke it.
+                      if (_pendingPaste == null && _clipboardError == null &&
+                          _contextMenuPosition == null) _copySelection();
+                    },
+                    onPanCancel: () => _selectionAnchor = null,
+                    onSecondaryTapDown: (details) => _openClipboardMenu(details.globalPosition),
+                        child: child,
+                      ),
                   ),
                 );
               },
@@ -660,6 +993,7 @@ class _TerminalViewState extends State<TerminalView>
           ),
         ),
       ],
+      ),
     );
   }
 }
@@ -671,6 +1005,8 @@ class _TerminalViewState extends State<TerminalView>
 /// rebuilds only this subtree, never the tools panel or the surrounding chrome.
 class _TerminalCanvas extends StatefulWidget {
   final ValueListenable<Map<String, dynamic>?> frame;
+  final ValueListenable<TerminalSelection?> selection;
+  final Widget Function(Widget child) interactionBuilder;
   final String search;
   final bool starting;
   final String? error;
@@ -693,6 +1029,8 @@ class _TerminalCanvas extends StatefulWidget {
 
   const _TerminalCanvas({
     required this.frame,
+    required this.selection,
+    required this.interactionBuilder,
     required this.search,
     required this.starting,
     required this.error,
@@ -743,12 +1081,17 @@ class _TerminalCanvasState extends State<_TerminalCanvas> {
         return Stack(
           children: [
             Positioned.fill(
-              child: Padding(
+              // The input layer wraps only the terminal canvas, never prompt
+              // fields or reconnect controls drawn above it in this Stack.
+              child: widget.interactionBuilder(Padding(
                 padding: EdgeInsets.all(widget.inset),
                 child: RepaintBoundary(
-                  child: CustomPaint(
+                  child: ValueListenableBuilder<TerminalSelection?>(
+                    valueListenable: widget.selection,
+                    builder: (context, selection, _) => CustomPaint(
                     key: const ValueKey('terminal-canvas'),
                     painter: TerminalPainter(
+                      selection: selection,
                       screen: screen,
                       search: widget.search,
                       bold: widget.bold,
@@ -759,9 +1102,10 @@ class _TerminalCanvasState extends State<_TerminalCanvas> {
                       lineHeight: widget.lineHeight,
                       textCache: _textCache,
                     ),
+                    ),
                   ),
                 ),
-              ),
+              )),
             ),
             if (widget.starting)
               Center(
@@ -1016,6 +1360,7 @@ class TerminalTextCache {
 }
 
 class TerminalPainter extends CustomPainter {
+  final TerminalSelection? selection;
   final Map<String, dynamic>? screen;
   final String search;
   final bool bold;
@@ -1027,6 +1372,7 @@ class TerminalPainter extends CustomPainter {
   final TerminalTextCache textCache;
 
   TerminalPainter({
+    this.selection,
     required this.screen,
     required this.search,
     required this.bold,
@@ -1105,6 +1451,14 @@ class TerminalPainter extends CustomPainter {
         x += width;
       }
     }
+    final selectionPaint = Paint()..color = const Color(0x663A81D3);
+    for (final range in selection?.ranges(screen) ?? const <TerminalSelectionRange>[]) {
+      canvas.drawRect(
+        Rect.fromLTWH(range.start * cellWidth, range.row * lineHeight,
+            (range.end - range.start) * cellWidth, lineHeight),
+        selectionPaint,
+      );
+    }
     final cursor = screen?['cursor'] as List?;
     if (cursor != null && screen?['cursorHidden'] != true) {
       final row = (cursor[0] as num).toInt();
@@ -1173,6 +1527,7 @@ class TerminalPainter extends CustomPainter {
   @override
   bool shouldRepaint(TerminalPainter oldDelegate) =>
       !identical(oldDelegate.screen, screen) ||
+      oldDelegate.selection != selection ||
       oldDelegate.search != search ||
       oldDelegate.bold != bold ||
       oldDelegate.cursorStyle != cursorStyle ||
@@ -1272,4 +1627,53 @@ class _StatusCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The local clipboard actions are keyboard accessible without changing the
+/// shared menu/button primitive used by unrelated screens.
+class _ClipboardAction extends StatefulWidget {
+  final String label;
+  final VoidCallback? onPressed;
+  final bool autofocus;
+
+  const _ClipboardAction({
+    super.key,
+    required this.label,
+    this.onPressed,
+    this.autofocus = false,
+  });
+
+  @override
+  State<_ClipboardAction> createState() => _ClipboardActionState();
+}
+
+class _ClipboardActionState extends State<_ClipboardAction> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) => FocusableActionDetector(
+    enabled: widget.onPressed != null,
+    autofocus: widget.autofocus && widget.onPressed != null,
+    onShowFocusHighlight: (focused) => setState(() => _focused = focused),
+    shortcuts: const {
+      SingleActivator(LogicalKeyboardKey.enter, includeRepeats: false): ActivateIntent(),
+      SingleActivator(LogicalKeyboardKey.space, includeRepeats: false): ActivateIntent(),
+    },
+    actions: {
+      ActivateIntent: CallbackAction<ActivateIntent>(onInvoke: (_) {
+        widget.onPressed?.call();
+        return null;
+      }),
+    },
+    child: DecoratedBox(
+      position: DecorationPosition.foreground,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(XtRadius.field),
+        border: Border.all(
+          color: _focused ? XtColors.accent(context) : Colors.transparent,
+        ),
+      ),
+      child: XtActionButton(label: widget.label, onPressed: widget.onPressed),
+    ),
+  );
 }

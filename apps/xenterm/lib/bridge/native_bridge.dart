@@ -35,6 +35,8 @@ typedef _SnapC = Pointer<Utf8> Function(Uint64);
 typedef _Snap = Pointer<Utf8> Function(int);
 typedef _InputC = Int32 Function(Uint64, Pointer<Uint8>, UintPtr);
 typedef _Input = int Function(int, Pointer<Uint8>, int);
+typedef _PasteC = Int32 Function(Uint64, Pointer<Uint8>, UintPtr, Uint8);
+typedef _Paste = int Function(int, Pointer<Uint8>, int, int);
 typedef _ResizeC = Int32 Function(Uint64, Uint32, Uint32);
 typedef _Resize = int Function(int, int, int);
 typedef _CloseC = Int32 Function(Uint64);
@@ -61,6 +63,8 @@ typedef _Answer = int Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
+
+enum TerminalPasteResult { rejected, sent, needsReview }
 
 class NativeBridgeError implements Exception {
   final String message;
@@ -264,6 +268,9 @@ class NativeBridge {
   );
   late final _Input _input = _lib.lookupFunction<_InputC, _Input>(
     'xenterm_session_input',
+  );
+  late final _Paste _paste = _lib.lookupFunction<_PasteC, _Paste>(
+    'xenterm_session_paste',
   );
   late final _Resize _resize = _lib.lookupFunction<_ResizeC, _Resize>(
     'xenterm_session_resize',
@@ -512,6 +519,37 @@ class NativeBridge {
     try {
       pointer.asTypedList(bytes.length).setAll(0, bytes);
       return _input(handle, pointer, bytes.length) == 1;
+    } finally {
+      malloc.free(pointer);
+    }
+  }
+
+  /// Clipboard text must go through the core's review/encoding path, never
+  /// through raw input using a potentially stale snapshot's terminal mode.
+  TerminalPasteResult pasteText(
+    int handle,
+    String text, {
+    bool confirmed = false,
+  }) {
+    if (text.isEmpty) return TerminalPasteResult.rejected;
+    final _Paste paste;
+    try {
+      paste = _paste;
+    } on ArgumentError catch (error) {
+      throw NativeBridgeError(
+        'Clipboard paste requires the matching xenterm_bridge library: $error',
+      );
+    }
+    final bytes = utf8.encode(text);
+    final pointer = malloc.allocate<Uint8>(bytes.length);
+    try {
+      pointer.asTypedList(bytes.length).setAll(0, bytes);
+      return switch (paste(handle, pointer, bytes.length, confirmed ? 1 : 0)) {
+        0 => TerminalPasteResult.rejected,
+        1 => TerminalPasteResult.sent,
+        2 => TerminalPasteResult.needsReview,
+        final code => throw NativeBridgeError('Unknown clipboard result: $code'),
+      };
     } finally {
       malloc.free(pointer);
     }
