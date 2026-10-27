@@ -48,6 +48,10 @@ class _FakeTerminalSession implements TerminalSession {
   bool send(List<int> bytes) => true;
 
   @override
+  TerminalPasteResult paste(String text, {bool confirmed = false}) =>
+      TerminalPasteResult.sent;
+
+  @override
   bool resize(int cols, int rows) {
     resizes++;
     return true;

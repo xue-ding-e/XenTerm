@@ -726,6 +726,45 @@ pub extern "C" fn xenterm_session_input(handle: u64, bytes: *const u8, len: usiz
     }
 }
 
+fn clipboard_text(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes).ok().filter(|text| !text.is_empty())
+}
+
+const PASTE_REJECTED: i32 = 0;
+const PASTE_SENT: i32 = 1;
+const PASTE_NEEDS_REVIEW: i32 = 2;
+
+/// Clipboard text, not raw keystrokes. Returns 0 when rejected, 1 when sent,
+/// or 2 when the caller must present a review and repeat with confirmed = 1.
+/// The old raw-input ABI remains unchanged for terminal key sequences.
+#[no_mangle]
+pub extern "C" fn xenterm_session_paste(
+    handle: u64,
+    bytes: *const u8,
+    len: usize,
+    confirmed: u8,
+) -> i32 {
+    if bytes.is_null() || len == 0 || len > isize::MAX as usize || confirmed > 1 {
+        return PASTE_REJECTED;
+    }
+    let Some(session) = session(handle) else { return PASTE_REJECTED; };
+    let slice = unsafe { std::slice::from_raw_parts(bytes, len) };
+    let Some(text) = clipboard_text(slice) else { return PASTE_REJECTED; };
+    let confirm_multiline = match store() {
+        Ok(store) => {
+            let store = store.lock().unwrap_or_else(|p| p.into_inner());
+            store.paste_confirm_enabled()
+        }
+        Err(_) => return PASTE_REJECTED,
+    };
+    // The store guard above is dropped before the session takes its engine lock.
+    match session.paste_text(text, confirmed == 1, confirm_multiline) {
+        xenterm::frontend::PasteResult::Rejected => PASTE_REJECTED,
+        xenterm::frontend::PasteResult::Sent => PASTE_SENT,
+        xenterm::frontend::PasteResult::NeedsReview => PASTE_NEEDS_REVIEW,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn xenterm_session_resize(handle: u64, cols: u32, rows: u32) -> i32 {
     match session(handle) {
@@ -1597,5 +1636,17 @@ pub extern "C" fn xenterm_sftp_close(handle: u64) -> i32 {
 pub extern "C" fn xenterm_string_free(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(unsafe { CString::from_raw(ptr) });
+    }
+}
+
+#[cfg(test)]
+mod clipboard_validation_tests {
+    use super::clipboard_text;
+
+    #[test]
+    fn clipboard_text_requires_nonempty_utf8() {
+        assert_eq!(clipboard_text(&[]), None);
+        assert_eq!(clipboard_text(&[0xff]), None);
+        assert_eq!(clipboard_text("中🙂".as_bytes()), Some("中🙂"));
     }
 }
