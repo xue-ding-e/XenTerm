@@ -1,0 +1,346 @@
+name: Bridge macOS package validation
+
+on:
+  push:
+    branches: [validation/macos-bridge-package]
+    paths:
+      - .github/workflows/bridge-macos-validation.yml
+      - .github/scripts/native_bridge_probe.dart
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-macos-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: a1baa7d2bb87b2e65202cb4eee4e985c142d553d
+  SOURCE_REF: fix/bridge-bundle-paths
+
+jobs:
+  flutter-checks:
+    if: github.repository == 'xue-ding-e/XenTerm' && github.ref == 'refs/heads/validation/macos-bridge-package'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    outputs:
+      xt_version: ${{ steps.version.outputs.xt_version }}
+      app_semver: ${{ steps.version.outputs.app_semver }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      package_label: ${{ steps.version.outputs.package_label }}
+    steps:
+      - name: Check out only this control revision for probe analysis
+        timeout-minutes: 5
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Check out the exact product source
+        timeout-minutes: 5
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: xue-ding-e/XenTerm
+          ref: a1baa7d2bb87b2e65202cb4eee4e985c142d553d
+          path: source
+          persist-credentials: false
+
+      - name: Resolve provenance without changing product versions
+        id: version
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          # version.sh must describe the product checkout, not this control
+          # workflow's event SHA. Use its supported inputs; do not assemble a
+          # parallel version format or create a tag/release.
+          V="$(GITHUB_SHA="$SOURCE_SHA" GITHUB_REF_TYPE=branch GITHUB_REF_NAME="$SOURCE_REF" XT_CHANNEL=dev bash scripts/version.sh)"
+          printf '%s' "$V" | grep -Eq '^xt-dev-a1baa7d-T[0-9]{10}$'
+          echo "xt_version=$V" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          cargo = Path('crates/xenterm/Cargo.toml').read_text()
+          pubspec = Path('apps/xenterm/pubspec.yaml').read_text()
+          semver = re.search(r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"', cargo, re.M).group(1)
+          app = re.search(r'^version: ([0-9]+\.[0-9]+\.[0-9]+)(?:\+([0-9]+))?', pubspec, re.M)
+          assert app.group(1) == semver
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'app_semver={semver}\nbuild_number={app.group(2) or "1"}\n')
+              output.write(f'package_label=pr127-a1baa7d-run{os.environ["GITHUB_RUN_ID"]}\n')
+          PY
+          git diff --exit-code -- Cargo.lock crates/xenterm/Cargo.toml apps/xenterm/pubspec.yaml apps/xenterm/pubspec.lock
+
+      - name: Install the same Flutter SDK as upstream
+        timeout-minutes: 15
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+
+      - name: Resolve the actual Flutter app dependencies
+        timeout-minutes: 10
+        working-directory: source/apps/xenterm
+        run: |
+          set -euo pipefail
+          flutter --version
+          flutter pub get
+          git diff --exit-code -- pubspec.yaml pubspec.lock
+
+      - name: Analyze the complete Flutter application
+        timeout-minutes: 10
+        working-directory: source/apps/xenterm
+        run: flutter analyze
+
+      - name: Run the complete Flutter test suite
+        timeout-minutes: 15
+        working-directory: source/apps/xenterm
+        run: flutter test --reporter expanded
+
+      - name: Analyze the CI-only native probe before reserving macOS runners
+        timeout-minutes: 5
+        working-directory: source/apps/xenterm
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_WORKSPACE/control/.github/scripts/native_bridge_probe.dart" tool/ci_native_bridge_probe.dart
+          dart analyze --fatal-infos tool/ci_native_bridge_probe.dart
+
+  macos-package:
+    needs: flutter-checks
+    if: github.repository == 'xue-ding-e/XenTerm' && github.ref == 'refs/heads/validation/macos-bridge-package'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - { runner: macos-15, arch: aarch64, macho: arm64 }
+          - { runner: macos-15-intel, arch: x86_64, macho: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      XT_VERSION: ${{ needs.flutter-checks.outputs.xt_version }}
+      APP_SEMVER: ${{ needs.flutter-checks.outputs.app_semver }}
+      APP_BUILD_NUMBER: ${{ needs.flutter-checks.outputs.build_number }}
+      PACKAGE_LABEL: ${{ needs.flutter-checks.outputs.package_label }}
+      EXPECTED_MACHO_ARCH: ${{ matrix.macho }}
+      PACKAGE_ARCH: ${{ matrix.arch }}
+      # Existing native integration fixtures pin their own fresh profile.
+      # Never activate the optional live-SSH branch or its data cleanup path.
+      XENTERM_LIVE_PORT: ''
+      XENTERM_LIVE_DATA: ''
+    steps:
+      - name: Check out only this control revision for the probe
+        timeout-minutes: 5
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Check out the exact product source
+        timeout-minutes: 5
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: xue-ding-e/XenTerm
+          ref: a1baa7d2bb87b2e65202cb4eee4e985c142d553d
+          path: source
+          persist-credentials: false
+
+      - name: Install the upstream stable Rust toolchain
+        timeout-minutes: 10
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: Cache only Rust build dependencies and release targets
+        timeout-minutes: 10
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: source -> target
+          key: bridge-macos-validation-${{ matrix.arch }}
+
+      - name: Install the same Flutter SDK as upstream
+        timeout-minutes: 15
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+
+      - name: Verify the product checkout and runner architecture
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(uname -m)" = "$EXPECTED_MACHO_ARCH"
+          rustc --version --verbose
+          cargo --version
+          flutter --version
+          df -h .
+          printf '%s' "$XT_VERSION" | grep -Eq '^xt-dev-a1baa7d-T[0-9]{10}$'
+
+      - name: Check the real Rust bridge and its core dependency
+        timeout-minutes: 25
+        run: cargo check --release --locked --jobs 2 -p xenterm-bridge
+
+      - name: Test the real Rust bridge using its synthetic fixtures
+        timeout-minutes: 35
+        run: cargo test --release --locked --jobs 2 -p xenterm-bridge -- --test-threads=1
+
+      - name: Build the release bridge with the same target directory
+        timeout-minutes: 25
+        run: cargo build --release --locked --jobs 2 -p xenterm-bridge
+
+      - name: Build the complete macOS Flutter application
+        timeout-minutes: 30
+        working-directory: source/apps/xenterm
+        run: |
+          set -euo pipefail
+          flutter pub get
+          git diff --exit-code -- pubspec.yaml pubspec.lock
+          flutter build macos --release --build-name="$APP_SEMVER" --build-number="$APP_BUILD_NUMBER"
+
+      - name: Use the unchanged upstream bundling and packaging scripts
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          bash apps/xenterm/tool/bundle_native.sh
+          ASSET="$(bash apps/xenterm/tool/package_desktop.sh "$PACKAGE_LABEL" | tail -n 1)"
+          test "$ASSET" = "xenterm-${PACKAGE_LABEL}-macos-${PACKAGE_ARCH}-desktop.zip"
+          test -f "$ASSET"
+          echo "MAC_ASSET=$GITHUB_WORKSPACE/source/$ASSET" >> "$GITHUB_ENV"
+          git diff --exit-code -- Cargo.lock crates/xenterm/Cargo.toml apps/xenterm/pubspec.yaml apps/xenterm/pubspec.lock
+
+      - name: Verify and unpack the exact distribution archive
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import zipfile
+          with zipfile.ZipFile(os.environ['MAC_ASSET']) as archive:
+              assert archive.testzip() is None
+              names = set(archive.namelist())
+              assert 'XenTerm.app/Contents/MacOS/xenterm_app' in names
+              assert 'XenTerm.app/Contents/Frameworks/libxenterm_bridge.dylib' in names
+              assert 'XenTerm.app/Contents/MacOS/libxenterm_bridge.dylib' not in names
+          PY
+          UNPACK="$RUNNER_TEMP/XenTerm bridge 测试-${PACKAGE_ARCH}"
+          test ! -e "$UNPACK"
+          mkdir "$UNPACK"
+          ditto -x -k "$MAC_ASSET" "$UNPACK"
+          echo "MAC_UNPACKED_APP=$UNPACK/XenTerm.app" >> "$GITHUB_ENV"
+
+      - name: Verify architecture, signing integrity and system dependencies
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          APP="$MAC_UNPACKED_APP"
+          BRIDGE="$APP/Contents/Frameworks/libxenterm_bridge.dylib"
+          for BINARY in "$APP/Contents/MacOS/xenterm_app" "$BRIDGE" "$APP/Contents/Frameworks/FlutterMacOS.framework/Versions/A/FlutterMacOS"; do
+            test -f "$BINARY"
+            lipo -archs "$BINARY"
+            lipo -verify_arch "$EXPECTED_MACHO_ARCH" "$BINARY"
+          done
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -d --verbose=4 "$APP" 2>&1 | tee "$RUNNER_TEMP/macos-${PACKAGE_ARCH}-signature.log"
+          codesign -d --entitlements :- "$APP" > "$RUNNER_TEMP/macos-${PACKAGE_ARCH}-entitlements.plist"
+          otool -L "$BRIDGE"
+          python3 - <<'PY'
+          import os
+          import struct
+          from pathlib import Path
+          data = (Path(os.environ['MAC_UNPACKED_APP']) / 'Contents/Frameworks/libxenterm_bridge.dylib').read_bytes()
+          assert data[:4] == b'\xcf\xfa\xed\xfe', 'Expected the host-built thin 64-bit Rust dylib'
+          commands = struct.unpack_from('<I', data, 16)[0]
+          offset = 32
+          dependencies = []
+          for _ in range(commands):
+              command, size = struct.unpack_from('<II', data, offset)
+              assert size >= 8 and offset + size <= len(data)
+              if command in (0xC, 0x80000018, 0x8000001F, 0x20, 0x80000023):
+                  name_offset = struct.unpack_from('<I', data, offset + 8)[0]
+                  start = offset + name_offset
+                  dependency = data[start:data.index(b'\0', start)].decode()
+                  dependencies.append(dependency)
+                  assert dependency.startswith(('/usr/lib/', '/System/Library/')), dependency
+              offset += size
+          print('Bridge dependencies are Apple system paths:', dependencies)
+          PY
+
+      - name: Load the packaged bridge through the actual Dart path helper
+        timeout-minutes: 5
+        working-directory: source/apps/xenterm
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_WORKSPACE/control/.github/scripts/native_bridge_probe.dart" tool/ci_native_bridge_probe.dart
+          PROFILE="$RUNNER_TEMP/xenterm-version-only-${PACKAGE_ARCH}-${GITHUB_RUN_ID}"
+          test ! -e "$PROFILE"
+          XENTERM_DATA_DIR="$PROFILE" dart run tool/ci_native_bridge_probe.dart \
+            "$MAC_UNPACKED_APP/Contents/MacOS/xenterm_app" "$XT_VERSION" "$PROFILE" \
+            | tee "$RUNNER_TEMP/macos-${PACKAGE_ARCH}-probe.json"
+          test ! -e "$PROFILE"
+          git diff --exit-code -- pubspec.yaml pubspec.lock
+
+      - name: Record test-build provenance without user profile data
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import plistlib
+          import subprocess
+          from pathlib import Path
+          asset = Path(os.environ['MAC_ASSET'])
+          app = Path(os.environ['MAC_UNPACKED_APP'])
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          assert info['CFBundleShortVersionString'] == os.environ['APP_SEMVER']
+          assert str(info['CFBundleVersion']) == os.environ['APP_BUILD_NUMBER']
+          result = {
+              'purpose': 'non-official test build for ixbaicn/XenTerm#127',
+              'sourceCommit': os.environ['SOURCE_SHA'],
+              'sourceRef': os.environ['SOURCE_REF'],
+              'controlCommit': os.environ['GITHUB_SHA'],
+              'runId': os.environ['GITHUB_RUN_ID'],
+              'coreVersion': os.environ['XT_VERSION'],
+              'appVersion': info['CFBundleShortVersionString'],
+              'buildNumber': info['CFBundleVersion'],
+              'minimumMacOS': info.get('LSMinimumSystemVersion'),
+              'architecture': os.environ['EXPECTED_MACHO_ARCH'],
+              'artifact': asset.name,
+              'sha256': hashlib.sha256(asset.read_bytes()).hexdigest(),
+              'sizeBytes': asset.stat().st_size,
+              'rustc': subprocess.check_output(['rustc', '--version'], text=True).strip(),
+              'signing': 'upstream ad-hoc signing; no Apple notarization performed',
+              'nativeProbe': 'actual Dart dlopen and core_version/free; no profile APIs or Flutter UI startup',
+              'liveSSH': 'not exercised; XENTERM_LIVE_PORT is empty',
+          }
+          target = Path(os.environ['RUNNER_TEMP']) / f'macos-{os.environ["PACKAGE_ARCH"]}-provenance.json'
+          target.write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Upload only the test ZIP and bounded verification evidence
+        timeout-minutes: 8
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-bridge-test-${{ matrix.arch }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            ${{ env.MAC_ASSET }}
+            ${{ runner.temp }}/macos-${{ matrix.arch }}-provenance.json
+            ${{ runner.temp }}/macos-${{ matrix.arch }}-probe.json
+            ${{ runner.temp }}/macos-${{ matrix.arch }}-signature.log
+            ${{ runner.temp }}/macos-${{ matrix.arch }}-entitlements.plist
