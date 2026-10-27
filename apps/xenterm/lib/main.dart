@@ -49,11 +49,19 @@ class XenTermApp extends StatefulWidget {
   State<XenTermApp> createState() => _XenTermAppState();
 }
 
-class _XenTermAppState extends State<XenTermApp> {
+class _XenTermAppState extends State<XenTermApp> with WidgetsBindingObserver {
   static const _themeKey = 'xenterm.theme.light';
   static const _languageKey = 'xenterm.language';
   bool _lightTheme = false;
-  String _language = 'en';
+  // A missing preference means follow the system, not a persisted English
+  // choice. Keep it distinct so later locale changes cannot override a manual
+  // selection.
+  String? _languageOverride;
+  String get _language =>
+      _languageOverride ??
+      AppLanguage.resolveSystemLanguage(
+        WidgetsBinding.instance.platformDispatcher.locales,
+      );
   late final AppFonts _fonts = widget.fonts ?? AppFonts();
   late final CoreSettingsController _settings =
       widget.settings ?? CoreSettingsController();
@@ -61,6 +69,7 @@ class _XenTermAppState extends State<XenTermApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _fonts.addListener(_changed);
     if (widget.settings == null) _settings.load();
     _restoreTheme();
@@ -76,17 +85,25 @@ class _XenTermAppState extends State<XenTermApp> {
   Future<void> _restoreLanguage() async {
     final prefs = await SharedPreferences.getInstance();
     final code = prefs.getString(_languageKey);
-    if (mounted && AppLanguage.supported.containsKey(code)) {
-      setState(() => _language = code!);
+    if (mounted &&
+        _languageOverride == null &&
+        AppLanguage.supported.containsKey(code)) {
+      // Do not overwrite a choice made while the preferences were loading.
+      setState(() => _languageOverride = code);
     }
   }
 
   void _setLanguage(String code) {
     if (!AppLanguage.supported.containsKey(code)) return;
-    setState(() => _language = code);
+    setState(() => _languageOverride = code);
     SharedPreferences.getInstance().then(
       (prefs) => prefs.setString(_languageKey, code),
     );
+  }
+
+  @override
+  void didChangeLocales(List<Locale>? locales) {
+    if (_languageOverride == null) setState(() {});
   }
 
   void _setTheme(bool light) {
@@ -100,6 +117,7 @@ class _XenTermAppState extends State<XenTermApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _fonts.removeListener(_changed);
     if (widget.fonts == null) _fonts.dispose();
     if (widget.settings == null) _settings.dispose();
