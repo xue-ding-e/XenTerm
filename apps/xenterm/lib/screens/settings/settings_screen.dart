@@ -223,7 +223,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     // Let the platform IME finish/cancel Chinese composition first.
     if (_searchFocus.hasFocus && _search.value.composing.isValid &&
-        !_search.value.composing.isCollapsed) return KeyEventResult.ignored;
+        !_search.value.composing.isCollapsed) {
+      return KeyEventResult.ignored;
+    }
     if (event.logicalKey == LogicalKeyboardKey.escape && _query.isNotEmpty) {
       _clearSearch();
       return KeyEventResult.handled;
@@ -404,7 +406,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onChanged: _searchChanged,
                         onSubmitted: (_) {
                           if (_search.value.composing.isValid &&
-                              !_search.value.composing.isCollapsed) return;
+                              !_search.value.composing.isCollapsed) {
+                            return;
+                          }
                           final results = _results;
                           if (results.isNotEmpty) {
                             _openResult(results[(_resultIndex < results.length ? _resultIndex : 0)]);
