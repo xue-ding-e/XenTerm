@@ -6,7 +6,7 @@ import 'package:xenterm_app/bridge/native_bridge.dart';
 import 'package:xenterm_app/data/hosts.dart';
 import 'package:xenterm_app/main.dart';
 import 'package:xenterm_app/screens/terminal/terminal_view.dart';
-import 'package:xenterm_app/terminal/core_settings.dart';
+import 'support/shared_settings_fixture.dart';
 import 'package:xenterm_app/theme/app_fonts.dart';
 import 'package:xenterm_app/theme/app_theme.dart';
 
@@ -24,6 +24,9 @@ class _Session implements TerminalSession {
   bool resize(int columns, int lines) { cols = columns; rows = lines; return true; }
   @override
   bool send(List<int> bytes) => true;
+
+  @override
+  TerminalPasteResult paste(String text, {bool confirmed = false}) => TerminalPasteResult.sent;
   @override
   bool answerPrompt(int promptId, {required bool accept, String? username,
       String? password, String? text}) => true;
@@ -47,7 +50,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final fonts = AppFonts();
-    final settings = CoreSettingsController()..loaded = true;
+    final settings = SettingsFixture().controller();
     addTearDown(fonts.dispose);
     addTearDown(settings.dispose);
     await tester.pumpWidget(XenTermApp(
@@ -60,7 +63,7 @@ void main() {
     await tester.pumpAndSettle();
     final after = tester.renderObject<RenderParagraph>(label).size.height;
     expect(after, greaterThan(before));
-    expect(fonts.terminalSize, 15);
+    expect(fonts.terminalSize, 13);
     expect(tester.takeException(), isNull);
   });
 

@@ -7,6 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../terminal/core_settings.dart';
+
 class ImportedFont {
   final String name;
   final String family;
@@ -21,19 +23,70 @@ class ImportedFont {
   };
 }
 
-/// Owns UI/terminal font choices. Imported font bytes stay in the application's
-/// support directory; only labels/paths and selections live in preferences.
+/// Renderer cache of the shared core's UI/terminal font choices. Imported font
+/// bytes and their per-device registration cache stay in application support;
+/// choices themselves are read/written through CoreSettingsController.
 /// TerminalView reads these values for its cell measurement and painting.
 class AppFonts extends ChangeNotifier {
-  static const _key = 'xenterm.fonts.v1';
+  static const _legacyKey = 'xenterm.fonts.v1';
+  static const _assetsKey = 'xenterm.font-assets.v1';
+  CoreSettingsController? _settings;
   final List<ImportedFont> imported = [];
   String uiFamily = '';
   String terminalFamily = '';
   double uiSize = 14;
-  double terminalSize = 15;
+  double terminalSize = 13;
   String? error;
+  bool _wasSaving = false;
+  bool get saving => _settings?.saving ?? false;
 
-  static double bound(double size) => size.clamp(10, 28).toDouble();
+  void bindSettings(CoreSettingsController settings) {
+    if (identical(_settings, settings)) return;
+    _settings?.removeListener(_fromCore);
+    _settings = settings;
+    settings.addListener(_fromCore);
+    _fromCore();
+  }
+
+  void _fromCore() {
+    final controller = _settings;
+    if (controller == null || !controller.loaded) return;
+    final snapshot = controller.settings;
+    final changed = uiFamily != snapshot.uiFontFamily ||
+        terminalFamily != snapshot.fontFamily || uiSize != snapshot.uiFontSize ||
+        terminalSize != snapshot.fontSize;
+    uiFamily = snapshot.uiFontFamily;
+    terminalFamily = snapshot.fontFamily;
+    uiSize = snapshot.uiFontSize;
+    terminalSize = snapshot.fontSize;
+    final savingChanged = _wasSaving != controller.saving;
+    _wasSaving = controller.saving;
+    if (changed || savingChanged) notifyListeners();
+  }
+
+  void _update(Map<String, dynamic> patch, VoidCallback inMemory) {
+    final controller = _settings;
+    if (controller == null) {
+      // An unbound presenter is useful for isolated renderer tests. Production
+      // binds the shared controller before mounting any settings/terminal UI.
+      inMemory();
+      notifyListeners();
+      return;
+    }
+    controller.update(patch).then((failure) {
+      if (_disposed) return;
+      error = failure;
+      notifyListeners();
+    });
+  }
+
+  bool _disposed = false;
+  @override
+  void dispose() {
+    _disposed = true;
+    _settings?.removeListener(_fromCore);
+    super.dispose();
+  }
 
   String labelFor(String family) {
     if (family.isEmpty) return '默认';
@@ -43,38 +96,30 @@ class AppFonts extends ChangeNotifier {
     return family;
   }
 
-  void setUiFamily(String family) {
-    uiFamily = family;
-    notifyListeners();
-    _save();
-  }
+  void setUiFamily(String family) =>
+      _update({'ui_font_family': family}, () => uiFamily = family);
 
-  void setTerminalFamily(String family) {
-    terminalFamily = family;
-    notifyListeners();
-    _save();
-  }
+  void setTerminalFamily(String family) =>
+      _update({'font_family': family}, () => terminalFamily = family);
 
-  void setUiSize(double size) {
-    uiSize = bound(size);
-    notifyListeners();
-    _save();
-  }
+  void setUiSize(double size) => _update(
+    {'ui_font_size': size.isFinite && size == size.roundToDouble() ? size.toInt() : size},
+    () => uiSize = size,
+  );
 
-  void setTerminalSize(double size) {
-    terminalSize = bound(size);
-    notifyListeners();
-    _save();
-  }
+  void setTerminalSize(double size) => _update(
+    {'font_size': size.isFinite && size == size.roundToDouble() ? size.toInt() : size},
+    () => terminalSize = size,
+  );
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
+    // Do not rewrite the old preference blob: it remains available for the
+    // explicit migration preview. Only font registration metadata is reused.
+    final raw = prefs.getString(_assetsKey) ?? prefs.getString(_legacyKey);
     if (raw == null) return;
     try {
       final saved = jsonDecode(raw) as Map<String, dynamic>;
-      uiSize = bound((saved['uiSize'] as num?)?.toDouble() ?? 14);
-      terminalSize = bound((saved['terminalSize'] as num?)?.toDouble() ?? 15);
       for (final entry in (saved['imported'] as List<dynamic>? ?? [])) {
         final item = entry as Map<String, dynamic>;
         final font = ImportedFont(
@@ -91,15 +136,8 @@ class AppFonts extends ChangeNotifier {
           }
         }
       }
-      final families = imported.map((font) => font.family).toSet();
-      final ui = saved['uiFamily'];
-      final terminal = saved['terminalFamily'];
-      uiFamily = ui is String && families.contains(ui) ? ui : '';
-      terminalFamily = terminal is String && families.contains(terminal)
-          ? terminal
-          : '';
     } catch (_) {
-      error = '字体设置读取失败，已恢复默认字体';
+      error = '字体注册信息读取失败，已保留共享字体设置';
     }
     notifyListeners();
   }
@@ -132,7 +170,7 @@ class AppFonts extends ChangeNotifier {
         rethrow;
       }
       imported.add(ImportedFont(selected.name, family, path));
-      await _save();
+      await _saveAssets();
       notifyListeners();
       return true;
     } catch (e) {
@@ -154,15 +192,11 @@ class AppFonts extends ChangeNotifier {
     await loader.load();
   }
 
-  Future<void> _save() async {
+  Future<void> _saveAssets() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
-      _key,
+      _assetsKey,
       jsonEncode({
-        'uiFamily': uiFamily,
-        'terminalFamily': terminalFamily,
-        'uiSize': uiSize,
-        'terminalSize': terminalSize,
         'imported': imported.map((font) => font.toJson()).toList(),
       }),
     );

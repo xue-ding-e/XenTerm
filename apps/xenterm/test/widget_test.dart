@@ -4,10 +4,16 @@ import 'package:xenterm_app/data/hosts.dart';
 import 'package:xenterm_app/main.dart';
 import 'package:xenterm_app/theme/app_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'support/shared_settings_fixture.dart';
 
 void main() {
+  late SettingsFixture fixture;
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    fixture = SettingsFixture();
+  });
   testWidgets('the shell mounts with the hosts screen showing', (tester) async {
-    await tester.pumpWidget(XenTermApp(hostsLoader: () async => kSampleHosts));
+    await tester.pumpWidget(XenTermApp(settings: fixture.controller(), hostsLoader: () async => kSampleHosts));
     await tester.pumpAndSettle();
     expect(find.text('Home'), findsWidgets);
     // The toolbar's button and the grid's tail card both say it.
@@ -17,7 +23,7 @@ void main() {
   testWidgets('a host opens the terminal preview and can be closed', (
     tester,
   ) async {
-    await tester.pumpWidget(XenTermApp(hostsLoader: () async => kSampleHosts));
+    await tester.pumpWidget(XenTermApp(settings: fixture.controller(), hostsLoader: () async => kSampleHosts));
     await tester.pumpAndSettle();
     // A plain card click connects immediately.
     await tester.tap(find.text('gateway-test02'));
@@ -36,7 +42,7 @@ void main() {
     'SFTP preview opens once, switches tabs, and closes independently',
     (tester) async {
       await tester.pumpWidget(
-        XenTermApp(hostsLoader: () async => kSampleHosts),
+        XenTermApp(settings: fixture.controller(), hostsLoader: () async => kSampleHosts),
       );
       await tester.pumpAndSettle();
       // The hover pencil opens the details drawer (edit path).
@@ -81,7 +87,7 @@ void main() {
     final fonts = AppFonts();
     addTearDown(fonts.dispose);
     await tester.pumpWidget(
-      XenTermApp(fonts: fonts, hostsLoader: () async => kSampleHosts),
+      XenTermApp(settings: fixture.controller(), fonts: fonts, hostsLoader: () async => kSampleHosts),
     );
     await tester.tap(find.text('Settings'));
     await tester.pumpAndSettle();
@@ -95,16 +101,16 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(plus);
     await tester.pumpAndSettle();
-    expect(fonts.terminalSize, 16);
+    expect(fonts.terminalSize, 14);
     expect(fonts.uiSize, 14);
   });
 
   testWidgets('the saved UI language is restored on launch', (tester) async {
-    SharedPreferences.setMockInitialValues({'xenterm.language': 'zh'});
+    fixture.values['language'] = 'zh';
     final fonts = AppFonts();
     addTearDown(fonts.dispose);
     await tester.pumpWidget(
-      XenTermApp(fonts: fonts, hostsLoader: () async => kSampleHosts),
+      XenTermApp(settings: fixture.controller(), fonts: fonts, hostsLoader: () async => kSampleHosts),
     );
     await tester.pumpAndSettle();
     // The navigation rail follows the persisted choice immediately.

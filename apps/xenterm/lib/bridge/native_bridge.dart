@@ -1151,6 +1151,15 @@ class CoreSettings {
   final bool bold;
   final bool sftpFollowCd;
   final String downloadDir;
+  final String language;
+  final String themePref;
+  final String fontFamily;
+  final double fontSize;
+  final String uiFontFamily;
+  final double uiFontSize;
+  final String revision;
+  final List<String> explicitFields;
+  final List<String> invalidLegacyFields;
 
   const CoreSettings({
     this.sessionLogs = false,
@@ -1160,25 +1169,71 @@ class CoreSettings {
     this.bold = false,
     this.sftpFollowCd = true,
     this.downloadDir = '',
+    this.language = 'system',
+    this.themePref = 'system',
+    this.fontFamily = '',
+    this.fontSize = 13,
+    this.uiFontFamily = '',
+    this.uiFontSize = 14,
+    this.revision = 'uninitialized',
+    this.explicitFields = const [],
+    this.invalidLegacyFields = const [],
   });
 
-  factory CoreSettings.fromCoreJson(Map<String, dynamic> json) => CoreSettings(
-    sessionLogs: json['session_logs'] as bool? ?? false,
-    cursorStyle: (json['cursor_style'] as String?) ?? 'block',
-    lineSpacing: (json['line_spacing'] as num?)?.toDouble() ?? 1.0,
-    padding: json['padding'] as bool? ?? true,
-    bold: json['bold'] as bool? ?? false,
-    sftpFollowCd: json['sftp_follow_cd'] as bool? ?? true,
-    downloadDir: (json['download_dir'] as String?) ?? '',
-  );
+  /// The service, not this adapter, owns defaults, validation and persistence.
+  /// A legacy bridge without revisions is not a successful shared-settings get.
+  factory CoreSettings.fromCoreJson(Map<String, dynamic> json) {
+    if (json['revision'] is! String) {
+      throw const FormatException('The core does not support shared settings');
+    }
+    return CoreSettings(
+      sessionLogs: json['session_logs'] as bool,
+      cursorStyle: json['cursor_style'] as String,
+      lineSpacing: (json['line_spacing'] as num).toDouble(),
+      padding: json['padding'] as bool,
+      bold: json['bold'] as bool,
+      sftpFollowCd: json['sftp_follow_cd'] as bool,
+      downloadDir: json['download_dir'] as String,
+      language: json['language'] as String,
+      themePref: json['theme_pref'] as String,
+      fontFamily: json['font_family'] as String,
+      fontSize: (json['font_size'] as num).toDouble(),
+      uiFontFamily: json['ui_font_family'] as String,
+      uiFontSize: (json['ui_font_size'] as num).toDouble(),
+      revision: json['revision'] as String,
+      explicitFields: List<String>.unmodifiable(
+        (json['explicit_fields'] as List).cast<String>(),
+      ),
+      invalidLegacyFields: List<String>.unmodifiable(
+        (json['invalid_legacy_fields'] as List).cast<String>(),
+      ),
+    );
+  }
+}
+
+class CoreSettingsWriteResult {
+  final CoreSettings? settings;
+  final String? error;
+  final String? code;
+  bool get ok => settings != null;
+
+  const CoreSettingsWriteResult({this.settings, this.error, this.code});
+
+  factory CoreSettingsWriteResult.fromCoreJson(Map<String, dynamic> json) =>
+      json['ok'] == true
+          ? CoreSettingsWriteResult(settings: CoreSettings.fromCoreJson(
+              (json['settings'] as Map).cast<String, dynamic>(),
+            ))
+          : CoreSettingsWriteResult(
+              error: json['error'] as String? ?? 'Could not save settings',
+              code: json['code'] as String?,
+            );
 }
 
 Future<CoreSettings> loadSettingsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
-    if (bridge == null) {
-      throw NativeBridge.loadError;
-    }
+    if (bridge == null) throw NativeBridge.loadError;
     final raw = bridge.settingsJson();
     if (raw == null) {
       throw const NativeBridgeError('The core could not load settings');
@@ -1189,20 +1244,17 @@ Future<CoreSettings> loadSettingsFromCore() {
   });
 }
 
-Future<CoreWriteResult> saveSettingsToCore(Map<String, dynamic> values) {
+Future<CoreSettingsWriteResult> saveSettingsToCore(
+  Map<String, dynamic> values, {
+  required String expectedRevision,
+}) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
-    if (bridge == null) {
-      throw NativeBridge.loadError;
-    }
-    final result = bridge.setSettings(values);
-    if (result['ok'] != true) {
-      return CoreWriteResult(
-        ok: false,
-        error: (result['error'] as String?) ?? 'Could not save settings',
-      );
-    }
-    return const CoreWriteResult(ok: true);
+    if (bridge == null) throw NativeBridge.loadError;
+    return CoreSettingsWriteResult.fromCoreJson(bridge.setSettings({
+      ...values,
+      'expected_revision': expectedRevision,
+    }));
   });
 }
 

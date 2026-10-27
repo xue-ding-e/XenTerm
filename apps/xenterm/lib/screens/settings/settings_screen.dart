@@ -20,7 +20,6 @@ import '../../bridge/native_bridge.dart'
 import '../../l10n/app_language.dart';
 import '../../terminal/core_settings.dart';
 import '../../theme/app_fonts.dart';
-import '../../theme/app_appearance.dart';
 import '../../theme/app_field.dart';
 import 'settings_search.dart';
 import 'settings_links.dart';
@@ -154,6 +153,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _query = '';
   String? _locatedId;
   int _resultIndex = 0;
+  bool _legacyPreviewOpen = false;
+  final _legacyFields = <String>{};
 
   List<SettingsSearchEntry> get _results => searchSettings(
     _query,
@@ -361,6 +362,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
     return Focus(
       autofocus: true,
       onKeyEvent: _searchKey,
@@ -370,7 +372,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            height: 80 * MediaQuery.textScalerOf(context).scale(14) / 14,
+            height: scale > 1 ? 80 * scale : 80,
             padding: const EdgeInsets.fromLTRB(20, 25, 20, 0),
             decoration: BoxDecoration(
               border: Border(
@@ -419,7 +421,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                 ),
-                if (_saving)
+                const SizedBox(width: 6),
+                XtIconButton(
+                  key: const ValueKey('settings-refresh'),
+                  icon: LucideIcons.refreshCw,
+                  tooltip: AppLanguage.tr(context, 'Refresh shared settings'),
+                  onPressed: widget.settings.saving ? null : () {
+                    setState(() => _saveError = null);
+                    widget.settings.load();
+                  },
+                ),
+                if (_saving || widget.settings.saving)
                   const SizedBox(
                     width: 14,
                     height: 14,
@@ -461,11 +473,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            if (_saveError != null)
+                            if (_saveError != null || widget.settings.error != null)
                               _SectionCard(
                                 children: [
                                   _SettingsText(
-                                    _saveError!,
+                                    _saveError ?? widget.settings.error!,
                                     color: XtColors.danger(context),
                                   ),
                                 ],
@@ -699,9 +711,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Widget> _terminalTab() {
     final fonts = widget.fonts;
     final core = _core;
-    final language = AppLanguage.maybeOf(context);
-    final appearance = AppAppearance.maybeOf(context);
+
     return [
+      if (widget.settings.legacyPreferencePreview.isNotEmpty) _legacyCard(),
       // Language is global, so it sits first: switching it rebuilds the whole
       // shell while every value below stays untouched.
       _SectionCard(
@@ -710,9 +722,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _target('language', XtSelectRow<String>(
             key: const ValueKey('setting-language'),
             label: 'Interface language',
-            value: language?.code ?? 'en',
-            options: const {'en': 'English', 'zh': '简体中文'},
-            onChanged: (code) => language?.onChanged(code),
+            value: core.language,
+            options: const {'system': 'Follow system', 'en': 'English', 'zh': '简体中文'},
+            onChanged: (code) => _save({'language': code}),
           )),
         ],
       ),
@@ -788,6 +800,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _target('terminal-size', _StepperRow(
             label: 'Terminal text size',
             keyPrefix: 'terminal',
+            enabled: !fonts.saving,
             value: fonts.terminalSize,
             onChanged: fonts.setTerminalSize,
             min: 8,
@@ -800,22 +813,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         children: [
           _target('theme', XtSelectRow<String>(
             label: 'Theme',
-            value: (appearance?.themeMode ??
-                (widget.lightTheme ? AppThemeMode.light : AppThemeMode.dark)).name,
-            options: {
-              // A system choice requires the shared settings adapter above us.
-              // Never fake follow-system by saving today's resolved bool.
-              if (appearance != null) 'system': 'Follow system',
-              'dark': 'Dark', 'light': 'Light',
-            },
-            onChanged: (value) {
-              final mode = AppThemeMode.values.byName(value);
-              if (appearance != null) {
-                appearance.onThemeChanged(mode);
-              } else {
-                widget.onThemeChanged(mode == AppThemeMode.light);
-              }
-            },
+            value: core.themePref,
+            options: const {'system': 'Follow system', 'dark': 'Dark', 'light': 'Light'},
+            onChanged: (value) => _save({'theme_pref': value}),
           )),
         ],
       ),
@@ -836,6 +836,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _target('interface-size', _StepperRow(
             label: 'Interface text size',
             keyPrefix: 'interface',
+            enabled: !fonts.saving,
             value: fonts.uiSize,
             onChanged: fonts.setUiSize,
             min: 8,
@@ -860,6 +861,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     ];
+  }
+
+  Widget _legacyCard() {
+    final previous = widget.settings.legacyPreferencePreview;
+    final current = <String, dynamic>{
+      'language': _core.language, 'theme_pref': _core.themePref,
+      'font_family': _core.fontFamily, 'font_size': _core.fontSize,
+      'ui_font_family': _core.uiFontFamily, 'ui_font_size': _core.uiFontSize,
+    };
+    const labels = {
+      'language': 'Interface language', 'theme_pref': 'Theme',
+      'font_family': 'Terminal font', 'font_size': 'Terminal text size',
+      'ui_font_family': 'Interface font', 'ui_font_size': 'Interface text size',
+    };
+    return _SectionCard(
+      title: 'Previous interface preferences',
+      children: [
+        const _SettingsText('Old preferences are preserved. Nothing is imported automatically.'),
+        _DestinationRow(
+          key: const ValueKey('settings-legacy-preview'),
+          label: _legacyPreviewOpen ? 'Hide previous preferences' : 'Review previous preferences',
+          onTap: () => setState(() => _legacyPreviewOpen = !_legacyPreviewOpen),
+        ),
+        if (_legacyPreviewOpen) ...[
+          for (final entry in previous.entries)
+            XtSwitchRow(
+              key: ValueKey('settings-legacy-${entry.key}'),
+              label: labels[entry.key] ?? entry.key,
+              description: AppLanguage.tr(context, 'Previous: {previous} · Shared: {current}', {
+                'previous': entry.value, 'current': current[entry.key],
+              }),
+              value: _legacyFields.contains(entry.key),
+              onChanged: (selected) => setState(() {
+                if (selected) { _legacyFields.add(entry.key); }
+                else { _legacyFields.remove(entry.key); }
+              }),
+            ),
+          const SizedBox(height: 16),
+          XtActionButton(
+            key: const ValueKey('settings-legacy-apply'),
+            label: AppLanguage.tr(context, 'Apply selected preferences'),
+            onPressed: _legacyFields.isEmpty || _saving || widget.settings.saving
+                ? null : () => _save({
+                    for (final key in _legacyFields) key: previous[key],
+                  }),
+          ),
+        ],
+      ],
+    );
   }
 
   List<Widget> _sftpTab() => [
@@ -953,7 +1003,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           keys: 'Ctrl+L',
           action: 'Clear the screen (sent to the shell)',
         ),
-        _ShortcutRow(keys: 'Ctrl+C', action: 'Interrupt the running command'),
+        _ShortcutRow(keys: 'Ctrl+C', action: 'Copy selected text; otherwise interrupt the running command'),
+        _ShortcutRow(keys: 'Ctrl+V', action: 'Paste clipboard text with safety review'),
+        _ShortcutRow(keys: 'Cmd+C / Cmd+V', action: 'Copy / paste on macOS'),
+        _ShortcutRow(keys: 'Ctrl+Shift+C / Ctrl+Shift+V', action: 'Copy / paste on Windows and Linux'),
+        _ShortcutRow(keys: 'Ctrl+F / Cmd+F', action: 'Search settings (while in Settings)'),
         _ShortcutRow(keys: 'Shift+Tab', action: 'Backtab'),
         _ShortcutRow(
           keys: 'Home / End / PgUp / PgDn',
@@ -971,21 +1025,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   List<String> _fontOptions(AppFonts fonts) => [
     'Default',
-    for (final f in fonts.imported) f.name,
+    ...{
+      if (fonts.terminalFamily.isNotEmpty) _familyLabel(fonts.terminalFamily),
+      if (fonts.uiFamily.isNotEmpty) _familyLabel(fonts.uiFamily),
+      for (final f in fonts.imported) f.name,
+    },
   ];
 
   String _familyLabel(String family) {
     for (final f in widget.fonts.imported) {
       if (f.family == family) return f.name;
     }
-    return 'Default';
+    return family;
   }
 
   String _familyValue(String label) {
     for (final f in widget.fonts.imported) {
       if (f.name == label) return f.family;
     }
-    return '';
+    return label;
   }
 }
 
@@ -1012,7 +1070,8 @@ class _TabSidebar extends StatelessWidget {
         border: Border(right: BorderSide(color: XtColors.hairline(context))),
       ),
       padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
+      child: SingleChildScrollView(
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           for (var i = 0; i < tabs.length; i++)
@@ -1022,6 +1081,7 @@ class _TabSidebar extends StatelessWidget {
               onTap: () => onSelect(i),
             ),
         ],
+        ),
       ),
     );
   }
@@ -1046,9 +1106,8 @@ class _TabItem extends StatelessWidget {
       child: XtHoverRow(
         selected: selected,
         onTap: onTap,
-        height: 36,
         radius: XtRadius.field,
-        padding: const EdgeInsets.symmetric(horizontal: 15),
+        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 9),
         child: Align(
           alignment: Alignment.centerLeft,
           child: Text(
@@ -1198,6 +1257,7 @@ class _StepperRow extends StatelessWidget {
   final double min;
   final double max;
   final String keyPrefix;
+  final bool enabled;
 
   const _StepperRow({
     required this.label,
@@ -1206,6 +1266,7 @@ class _StepperRow extends StatelessWidget {
     required this.min,
     required this.max,
     required this.keyPrefix,
+    this.enabled = true,
   });
 
   @override
@@ -1232,7 +1293,7 @@ class _StepperRow extends StatelessWidget {
             icon: LucideIcons.minus,
             size: 34,
             iconSize: 14,
-            onPressed: value > min ? () => onChanged(value - 1) : null,
+            onPressed: enabled && value > min ? () => onChanged(value - 1) : null,
           ),
           SizedBox(
             width: 51,
@@ -1250,7 +1311,7 @@ class _StepperRow extends StatelessWidget {
             icon: LucideIcons.plus,
             size: 34,
             iconSize: 14,
-            onPressed: value < max ? () => onChanged(value + 1) : null,
+            onPressed: enabled && value < max ? () => onChanged(value + 1) : null,
           ),
         ],
       ),

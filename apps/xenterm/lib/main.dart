@@ -4,7 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'data/hosts.dart';
@@ -14,6 +13,7 @@ import 'shell/window_activity.dart';
 import 'terminal/core_settings.dart';
 import 'theme/app_theme.dart';
 import 'theme/app_appearance.dart';
+import 'theme/legacy_preferences.dart';
 import 'theme/app_fonts.dart';
 
 /// Opt-in frame-timing probe for smoothness work. Build with
@@ -83,8 +83,10 @@ Future<void> main() async {
   // Pick the opaque window colour before the first frame: a translucent window
   // is what makes live resize / zoom / minimize cost extra compositor work on
   // macOS and Windows.
-  final prefs = await SharedPreferences.getInstance();
-  final restoreLight = prefs.getBool('xenterm.theme.light') ?? false;
+  // Shared-core settings load asynchronously; never let legacy preferences
+  // overwrite them. Use system brightness only for the initial opaque frame.
+  final restoreLight = WidgetsBinding.instance.platformDispatcher.platformBrightness
+      == Brightness.light;
   final windowBackground =
       restoreLight ? XtPalette.paperBase : XtPalette.black900;
 
@@ -161,76 +163,100 @@ class XenTermApp extends StatefulWidget {
 }
 
 class _XenTermAppState extends State<XenTermApp> with WidgetsBindingObserver {
-  static const _themeKey = 'xenterm.theme.light';
-  static const _languageKey = 'xenterm.language';
-  bool _lightTheme = false;
-  // A missing preference means follow the system, not a persisted English
-  // choice. Keep it distinct so later locale changes cannot override a manual
-  // selection.
-  String? _languageOverride;
-  String get _language =>
-      _languageOverride ??
-      AppLanguage.resolveSystemLanguage(
-        WidgetsBinding.instance.platformDispatcher.locales,
-      );
   late final AppFonts _fonts = widget.fonts ?? AppFonts();
   late final CoreSettingsController _settings =
       widget.settings ?? CoreSettingsController();
+
+  AppThemeMode get _themeMode => switch (_settings.settings.themePref) {
+    'light' => AppThemeMode.light,
+    'dark' => AppThemeMode.dark,
+    _ => AppThemeMode.system,
+  };
+  bool get _lightTheme => switch (_themeMode) {
+    AppThemeMode.light => true,
+    AppThemeMode.dark => false,
+    AppThemeMode.system =>
+        WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+            Brightness.light,
+  };
+  // Resolution is a platform adapter. Persist only the shared choice, never
+  // today's resolved system locale/brightness.
+  String get _language => AppLanguage.supported.containsKey(_settings.settings.language)
+      ? _settings.settings.language
+      : AppLanguage.resolveSystemLanguage(
+          WidgetsBinding.instance.platformDispatcher.locales,
+        );
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _fonts.bindSettings(_settings);
     _fonts.addListener(_changed);
-    if (widget.settings == null) _settings.load();
-    _restoreTheme();
-    _restoreLanguage();
+    _settings.addListener(_changed);
+    _syncWindowSurface();
+    if (!_settings.loaded) _initialize();
   }
 
-  Future<void> _restoreTheme() async {
-    final prefs = await SharedPreferences.getInstance();
-    final light = prefs.getBool(_themeKey);
-    if (light != null && mounted) setState(() => _lightTheme = light);
-  }
-
-  Future<void> _restoreLanguage() async {
-    final prefs = await SharedPreferences.getInstance();
-    final code = prefs.getString(_languageKey);
-    if (mounted &&
-        _languageOverride == null &&
-        AppLanguage.supported.containsKey(code)) {
-      // Do not overwrite a choice made while the preferences were loading.
-      setState(() => _languageOverride = code);
+  Future<void> _initialize() async {
+    await _settings.load();
+    if (!mounted) return;
+    // A preview is not an import. Do not overwrite either source, even when a
+    // legacy preference differs from a core default of uncertain provenance.
+    try {
+      _settings.legacyPreferencePreview = await readLegacyAppearancePreferences();
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Optional old preference storage being unavailable does not invalidate
+      // a successfully loaded shared-core snapshot.
     }
   }
 
-  void _setLanguage(String code) {
-    if (!AppLanguage.supported.containsKey(code)) return;
-    setState(() => _languageOverride = code);
-    SharedPreferences.getInstance().then(
-      (prefs) => prefs.setString(_languageKey, code),
-    );
-  }
+  void _setLanguage(String code) => _settings.update({'language': code});
+  void _setTheme(bool light) =>
+      _setThemeMode(light ? AppThemeMode.light : AppThemeMode.dark);
+  void _setThemeMode(AppThemeMode mode) =>
+      _settings.update({'theme_pref': mode.name});
 
   @override
   void didChangeLocales(List<Locale>? locales) {
-    if (_languageOverride == null) setState(() {});
+    if (_settings.settings.language == 'system') setState(() {});
   }
 
-  void _setTheme(bool light) {
-    setState(() => _lightTheme = light);
-    SharedPreferences.getInstance().then(
-      (prefs) => prefs.setBool(_themeKey, light),
-    );
-    configureWindowSurface(light ? XtPalette.paperBase : XtPalette.black900);
+  @override
+  void didChangePlatformBrightness() {
+    if (_themeMode == AppThemeMode.system) _changed();
   }
 
-  void _changed() => setState(() {});
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && widget.settings == null) {
+      // The FFI wrapper runs in Isolate.run; a full profile refresh is not a
+      // per-frame/per-second poll. It may involve disk/keyring work.
+      _settings.load(clearError: false);
+    }
+  }
+
+  Color? _windowSurface;
+
+  void _syncWindowSurface() {
+    final color = _lightTheme ? XtPalette.paperBase : XtPalette.black900;
+    if (_windowSurface == color) return;
+    _windowSurface = color;
+    configureWindowSurface(color);
+  }
+
+  void _changed() {
+    if (!mounted) return;
+    _syncWindowSurface();
+    setState(() {});
+  }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _fonts.removeListener(_changed);
+    _settings.removeListener(_changed);
     if (widget.fonts == null) _fonts.dispose();
     if (widget.settings == null) _settings.dispose();
     super.dispose();
@@ -259,7 +285,27 @@ class _XenTermAppState extends State<XenTermApp> with WidgetsBindingObserver {
         ),
         child: child!,
       ),
-      home: AppLanguage(
+      home: !_settings.loaded
+          ? Scaffold(child: Center(child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_settings.error == null) const CircularProgressIndicator()
+                else ...[
+                  Text(AppLanguage.translate(_language, 'Could not load shared settings')),
+                  const SizedBox(height: 12),
+                  Text(_settings.error!),
+                  const SizedBox(height: 12),
+                  PrimaryButton(
+                    onPressed: _initialize,
+                    child: Text(AppLanguage.translate(_language, 'Retry')),
+                  ),
+                ],
+              ],
+            )))
+          : AppAppearance(
+              themeMode: _themeMode,
+              onThemeChanged: _setThemeMode,
+              child: AppLanguage(
         code: _language,
         onChanged: _setLanguage,
         child: DefaultTextEditingShortcuts(
@@ -278,7 +324,8 @@ class _XenTermAppState extends State<XenTermApp> with WidgetsBindingObserver {
             ),
           ),
         ),
-      ),
+              ),
+            ),
     );
   }
 }
