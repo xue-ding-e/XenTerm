@@ -7,8 +7,9 @@ import 'zh_terminal.dart';
 
 /// UI language lives above the shell so every page can read the same choice.
 ///
-/// The selected code is persisted by the app root (`main.dart`) in
-/// `SharedPreferences` under `xenterm.language`. Translations are literal maps
+/// An explicit choice is persisted by the app root (`main.dart`) in
+/// `SharedPreferences` under `xenterm.language`; without one, the app follows
+/// the system language. Translations are literal maps
 /// split by area (one file per screen group) so screens can be translated
 /// independently; the English source string is the key and also the fallback.
 ///
@@ -18,6 +19,17 @@ import 'zh_terminal.dart';
 /// (`'1 match'` vs `'{count} matches'`) at the call site.
 class AppLanguage extends InheritedWidget {
   static const supported = <String, String>{'en': 'English', 'zh': '简体中文'};
+
+  /// Picks the first supported language in the system's preference order.
+  /// Regional/script variants share our existing language catalogue (for
+  /// example, `zh-CN` and `zh-Hans` both use Simplified Chinese).
+  static String resolveSystemLanguage(Iterable<Locale> locales) {
+    for (final locale in locales) {
+      final code = locale.languageCode;
+      if (supported.containsKey(code)) return code;
+    }
+    return 'en';
+  }
 
   final String code;
   final ValueChanged<String> onChanged;
