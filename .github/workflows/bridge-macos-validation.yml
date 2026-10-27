@@ -164,12 +164,13 @@ jobs:
         timeout-minutes: 10
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - name: Cache only Rust build dependencies and release targets
+      - name: Cache only Rust build dependencies and targets
         timeout-minutes: 10
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: source -> target
           key: bridge-macos-validation-${{ matrix.arch }}
+          cache-on-failure: 'true'
 
       - name: Install the same Flutter SDK as upstream
         timeout-minutes: 15
@@ -193,11 +194,13 @@ jobs:
 
       - name: Check the real Rust bridge and its core dependency
         timeout-minutes: 25
-        run: cargo check --release --locked --jobs 2 -p xenterm-bridge
+        run: cargo check --locked --jobs 2 -p xenterm-bridge
 
       - name: Test the real Rust bridge using its synthetic fixtures
+        # Use the default test profile, as upstream CI does. The distribution
+        # dylib is still built with the unchanged release/LTO profile below.
         timeout-minutes: 35
-        run: cargo test --release --locked --jobs 2 -p xenterm-bridge -- --test-threads=1
+        run: cargo test --locked --jobs 2 -p xenterm-bridge -- --test-threads=1
 
       - name: Build the release bridge with the same target directory
         timeout-minutes: 25
@@ -252,7 +255,7 @@ jobs:
           for BINARY in "$APP/Contents/MacOS/xenterm_app" "$BRIDGE" "$APP/Contents/Frameworks/FlutterMacOS.framework/Versions/A/FlutterMacOS"; do
             test -f "$BINARY"
             lipo -archs "$BINARY"
-            lipo -verify_arch "$EXPECTED_MACHO_ARCH" "$BINARY"
+            lipo "$BINARY" -verify_arch "$EXPECTED_MACHO_ARCH"
           done
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -d --verbose=4 "$APP" 2>&1 | tee "$RUNNER_TEMP/macos-${PACKAGE_ARCH}-signature.log"
