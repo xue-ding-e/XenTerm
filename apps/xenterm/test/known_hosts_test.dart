@@ -51,6 +51,11 @@ void main() {
       find.byKey(const ValueKey('known-host-remove-example.test:2222')),
     );
     await tester.pumpAndSettle();
+    expect(deleted, isNull);
+    await tester.tap(
+      find.byKey(const ValueKey('known-host-confirm-example.test:2222')),
+    );
+    await tester.pumpAndSettle();
     expect(deleted, 'example.test:2222');
     expect(find.text('No known hosts yet'), findsOneWidget);
   });
