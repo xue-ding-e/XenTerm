@@ -35,6 +35,22 @@ void main() {
   testWidgets('many remembered keys scroll without a render overflow', (
     tester,
   ) async {
+    final copied = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied.add((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
     final hosts = List.generate(
       100,
       (i) => KnownHost(
@@ -50,9 +66,9 @@ void main() {
     expect(tester.takeException(), isNull);
     final list = find.byKey(const ValueKey('known-host-list'));
     expect(list, findsOneWidget);
-    final last = find.byKey(
-      const ValueKey('known-host-server-99.example.invalid:22'),
-    );
+    // A card's empty center need not participate in hit testing. Prove its
+    // real final-row action is visible and usable after scrolling instead.
+    final last = _button(_action('copy-address', hosts.last.id));
     await tester.scrollUntilVisible(
       last,
       300,
@@ -60,6 +76,9 @@ void main() {
       maxScrolls: 100,
     );
     expect(last.hitTestable(), findsOneWidget);
+    await tester.tap(last);
+    await tester.pump();
+    expect(copied, [hosts.last.id]);
     expect(tester.takeException(), isNull);
   });
 

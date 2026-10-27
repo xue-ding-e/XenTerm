@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' as foundation;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -121,7 +121,6 @@ void main() {
     });
   });
   tearDown(() {
-    debugDefaultTargetPlatformOverride = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null);
   });
@@ -145,18 +144,17 @@ void main() {
     expect(clipboard, 'synthetic-paste');
   });
 
-  for (final platform in [TargetPlatform.linux, TargetPlatform.windows, TargetPlatform.macOS]) {
+  for (final platform in [foundation.TargetPlatform.linux, foundation.TargetPlatform.windows, foundation.TargetPlatform.macOS]) {
     testWidgets('$platform platform clipboard chords never become PTY key bytes', (tester) async {
-      debugDefaultTargetPlatformOverride = platform;
       final session = _Session();
       await _mount(tester, session);
-      final mac = platform == TargetPlatform.macOS;
+      final mac = platform == foundation.TargetPlatform.macOS;
       await _keys(tester, LogicalKeyboardKey.keyC, control: !mac, shift: !mac, meta: mac);
       expect(session.sent, isEmpty);
       await _keys(tester, LogicalKeyboardKey.keyV, control: !mac, shift: !mac, meta: mac);
       expect(session.pasted, ['synthetic-paste']);
       expect(session.sent, isEmpty);
-    });
+    }, variant: TargetPlatformVariant.only(platform));
   }
 
   testWidgets('Ctrl+V uses paste rather than raw input', (tester) async {
