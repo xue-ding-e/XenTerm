@@ -86,8 +86,10 @@ void main() {
     await tester.tap(find.text('Settings'));
     await tester.pumpAndSettle();
     expect(find.text('Terminal settings'), findsOneWidget);
-    expect(find.text('Font'), findsWidgets);
-    expect(find.text('Text Size'), findsWidgets);
+    expect(find.text('Terminal font'), findsOneWidget);
+    expect(find.text('Interface font'), findsOneWidget);
+    expect(find.text('Terminal text size'), findsOneWidget);
+    expect(find.text('Interface text size'), findsOneWidget);
     final plus = find.byKey(const ValueKey('terminal-plus'));
     await tester.ensureVisible(plus);
     await tester.pumpAndSettle();

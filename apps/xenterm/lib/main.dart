@@ -8,6 +8,7 @@ import 'l10n/app_language.dart';
 import 'shell/root_shell.dart';
 import 'terminal/core_settings.dart';
 import 'theme/app_theme.dart';
+import 'theme/app_appearance.dart';
 import 'theme/app_fonts.dart';
 
 Future<void> main() async {
@@ -137,10 +138,21 @@ class _XenTermAppState extends State<XenTermApp> with WidgetsBindingObserver {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: _lightTheme ? xtLightScheme() : xtDarkScheme(),
-        typography: const Typography.geist().scale(_fonts.uiSize / 14),
+        typography: appTypography(_fonts.uiFamily),
         // The app's own radii (8/10/15) are applied at the call sites via
         // XtRadius; the multiplier only styles library internals.
         radius: 0.5,
+      ),
+      // Wrap the navigator too: popup menus and dialogs use the same scale.
+      // Fixed per-control fontSize values are scaled at text layout time.
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(
+          textScaler: AppTextScaler(
+            MediaQuery.textScalerOf(context),
+            _fonts.uiSize / 14,
+          ),
+        ),
+        child: child!,
       ),
       home: AppLanguage(
         code: _language,
@@ -149,7 +161,8 @@ class _XenTermAppState extends State<XenTermApp> with WidgetsBindingObserver {
           child: DefaultTextStyle.merge(
             style: TextStyle(
               fontFamily: _fonts.uiFamily.isEmpty ? null : _fonts.uiFamily,
-              fontSize: _fonts.uiSize,
+              // Applied once by AppTextScaler, not twice through inheritance.
+              fontSize: 14,
             ),
             child: RootShell(
               lightTheme: _lightTheme,
