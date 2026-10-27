@@ -16,7 +16,7 @@ void main() {
     'the packaged bridge loads and returns its version',
     () {
       final bridge = NativeBridge.tryLoad();
-      expect(bridge, isNotNull, reason: NativeBridge.loadError);
+      expect(bridge, isNotNull, reason: NativeBridge.loadError.toString());
       expect(bridge!.version(), isNotEmpty);
     },
     skip: path != null && path.isNotEmpty
