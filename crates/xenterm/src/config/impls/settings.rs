@@ -87,7 +87,7 @@ impl SettingsPatch {
             self.line_spacing.is_none_or(|v| v.is_finite() && (0.8..=1.5).contains(&v)),
             "line_spacing must be between 0.8 and 1.5"
         );
-        // GPUI terminal bounds are 8..32. UI uses the same range, covering all
+        // Shared terminal bounds are 8..32. UI uses the same range, covering all
         // previous Flutter persisted values (10..28), not only its 11..22 picker.
         for (size, name) in [(self.font_size, "font_size"), (self.ui_font_size, "ui_font_size")] {
             anyhow::ensure!(size.is_none_or(|v| (8..=32).contains(&v)),
