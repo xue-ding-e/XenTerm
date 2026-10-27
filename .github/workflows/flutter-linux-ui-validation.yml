@@ -1,0 +1,278 @@
+name: Flutter native Linux UI validation
+
+on:
+  push:
+    branches: [validation/linux-ui-flows]
+    paths:
+      - .github/workflows/flutter-linux-ui-validation.yml
+      - .github/scripts/flutter-ui/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-linux-ui-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Replaced once with the reviewed product commit before publishing control.
+  SOURCE_SHA: 0f572f7fbb9cec1b35c1a20678cb140ec37488df
+  BASELINE_SHA: 61ceb31fe07019a0200516c8d1a53d4e740a150f
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  XENTERM_LIVE_PORT: ''
+  XENTERM_LIVE_DATA: ''
+  LIBGL_ALWAYS_SOFTWARE: '1'
+  GDK_SCALE: '1'
+  GDK_DPI_SCALE: '1'
+
+jobs:
+  flutter-checks:
+    if: github.repository == 'xue-ding-e/XenTerm' && github.ref == 'refs/heads/validation/linux-ui-flows'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out reviewed control commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Check out exact product source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          repository: xue-ding-e/XenTerm
+          ref: 0f572f7fbb9cec1b35c1a20678cb140ec37488df
+          path: source
+          persist-credentials: false
+      - name: Check out original upstream baseline for assertion-red proofs
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          repository: ixbaicn/XenTerm
+          ref: 61ceb31fe07019a0200516c8d1a53d4e740a150f
+          path: baseline
+          persist-credentials: false
+      - name: Install fixed Flutter SDK
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        timeout-minutes: 15
+        with:
+          flutter-version: 3.47.7
+          channel: stable
+          cache: true
+      - name: Verify source and install bounded test-only dependencies
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C baseline rev-parse HEAD)" = "$BASELINE_SHA"
+          mkdir evidence
+          flutter --version | tee evidence/flutter-version.log
+          python3 -m pip install 'PyYAML==6.0.3' 'paramiko==5.1.0'
+          python3 -m pip freeze > evidence/python-test-dependencies.log
+          python3 -m unittest discover -s control/.github/scripts/flutter-ui -p 'test_*.py' -v
+      - name: Demonstrate original failures by assertions, not compilation
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          control="$GITHUB_WORKSPACE/control/.github/scripts/flutter-ui"
+          cd baseline/apps/xenterm
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.yaml pubspec.lock
+          cp "$control/baseline_locale_test.dart" test/ci_baseline_locale_test.dart
+          cp "$GITHUB_WORKSPACE/source/apps/xenterm/test/terminal_clipboard_regression_test.dart" test/ci_baseline_clipboard_test.dart
+          set +e
+          flutter test test/ci_baseline_locale_test.dart --reporter json > "$GITHUB_WORKSPACE/evidence/baseline-locale.jsonl" 2>&1
+          locale_status=$?
+          flutter test test/ci_baseline_clipboard_test.dart --reporter json > "$GITHUB_WORKSPACE/evidence/baseline-clipboard.jsonl" 2>&1
+          clipboard_status=$?
+          set -e
+          python3 "$control/assert_baseline_red.py" "$GITHUB_WORKSPACE/evidence/baseline-locale.jsonl" \
+            'unconfigured Chinese system selects Chinese' "'zh'" "'en'" "$locale_status"
+          python3 "$control/assert_baseline_red.py" "$GITHUB_WORKSPACE/evidence/baseline-clipboard.jsonl" \
+            'dragging terminal cells copies only the selected output' 'abcd' 'unchanged' "$clipboard_status"
+      - name: Analyze actual product and run all Flutter tests
+        timeout-minutes: 15
+        working-directory: source/apps/xenterm
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.yaml pubspec.lock
+          flutter analyze 2>&1 | tee "$GITHUB_WORKSPACE/evidence/flutter-analyze.log"
+          flutter test --reporter expanded 2>&1 | tee "$GITHUB_WORKSPACE/evidence/flutter-tests.log"
+      - name: Analyze the separate native test host before Rust builds
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          control="$GITHUB_WORKSPACE/control/.github/scripts/flutter-ui"
+          python3 "$control/prepare_test_host.py" source/apps/xenterm "$RUNNER_TEMP/integration-host" "$control"
+          cd "$RUNNER_TEMP/integration-host"
+          flutter pub get
+          flutter pub deps --json > "$GITHUB_WORKSPACE/evidence/test-host-deps.json"
+          python3 "$control/verify_test_host.py" "$GITHUB_WORKSPACE/source/apps/xenterm" "$PWD" \
+            "$GITHUB_WORKSPACE/evidence/test-host-deps.json" "$GITHUB_WORKSPACE/evidence/test-host-source-lock-proof.json"
+          dart analyze --fatal-infos integration_test
+          git -C "$GITHUB_WORKSPACE/source" diff --exit-code
+      - name: Preserve diagnostic evidence, not any runtime profiles
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 5
+        with:
+          name: flutter-checks-${{ github.run_id }}
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
+
+  linux-native:
+    needs: flutter-checks
+    if: github.repository == 'xue-ding-e/XenTerm' && github.ref == 'refs/heads/validation/linux-ui-flows'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - name: Check out control
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Check out product
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          repository: xue-ding-e/XenTerm
+          ref: 0f572f7fbb9cec1b35c1a20678cb140ec37488df
+          path: source
+          persist-credentials: false
+      - name: Install fixed Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        timeout-minutes: 10
+        with:
+          toolchain: 1.99.1
+      - name: Cache compilation only
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        timeout-minutes: 5
+        with:
+          workspaces: source -> target
+          shared-key: flutter-linux-ui-v1
+          cache-on-failure: true
+      - name: Install fixed Flutter SDK
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        timeout-minutes: 15
+        with:
+          flutter-version: 3.47.7
+          channel: stable
+          cache: true
+      - name: Install native desktop and fixture tools
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config cmake ninja-build clang \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev libudev-dev libdbus-1-dev \
+            xvfb xauth xdotool xclip openbox dbus-x11 imagemagick libgl1-mesa-dri \
+            fonts-noto-cjk locales tesseract-ocr tesseract-ocr-eng
+          sudo locale-gen en_US.UTF-8 zh_CN.UTF-8
+          python3 -m pip install 'PyYAML==6.0.3' 'paramiko==5.1.0'
+          mkdir evidence
+          rustc --version --verbose | tee evidence/rust-version.log
+          flutter --version | tee evidence/flutter-version.log
+          python3 -m pip freeze > evidence/python-test-dependencies.log
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          echo "PUB_CACHE=${PUB_CACHE:-$HOME/.pub-cache}" >> "$GITHUB_ENV"
+          mkdir -m 700 "$RUNNER_TEMP/core-test-profile"
+          echo "XENTERM_DATA_DIR=$RUNNER_TEMP/core-test-profile" >> "$GITHUB_ENV"
+      - name: Run complete headless core and bridge tests with synthetic fixtures
+        timeout-minutes: 40
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy \
+            cargo test --locked --jobs 2 -p xenterm --no-default-features --features headless -- --test-threads=1 \
+            2>&1 | tee "$GITHUB_WORKSPACE/evidence/core-tests.log"
+          cargo test --locked --jobs 2 -p xenterm-bridge -- --test-threads=1 \
+            2>&1 | tee "$GITHUB_WORKSPACE/evidence/bridge-tests.log"
+      - name: Build exact-source console for protocol parity and release bridge
+        timeout-minutes: 35
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          export XT_VERSION="$(GITHUB_SHA="$SOURCE_SHA" GITHUB_REF_TYPE=branch GITHUB_REF_NAME=validation/linux-ui-flows XT_CHANNEL=dev bash scripts/version.sh)"
+          [[ "$XT_VERSION" =~ ^xt-dev-${SOURCE_SHA:0:7}-T[0-9]{10}$ ]]
+          printf '%s\n' "XT_VERSION=$XT_VERSION" >> "$GITHUB_ENV"
+          cargo build --locked --jobs 2 -p xenterm --no-default-features --features headless
+          cargo build --release --locked --jobs 2 -p xenterm-bridge
+          target/debug/xenterm --version | tee "$GITHUB_WORKSPACE/evidence/cli-version.log"
+          nm -D target/release/libxenterm_bridge.so | grep -E ' xenterm_(session_paste|settings_json|settings_set)$' \
+            | tee "$GITHUB_WORKSPACE/evidence/bridge-exports.log"
+          test "$(wc -l < "$GITHUB_WORKSPACE/evidence/bridge-exports.log")" = 3
+          git diff --exit-code -- Cargo.lock
+      - name: Build and package the original release app using upstream scripts
+        timeout-minutes: 20
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd apps/xenterm && flutter pub get --enforce-lockfile && flutter build linux --release)
+          bash apps/xenterm/tool/bundle_native.sh
+          PACKAGE_LABEL="ui-${SOURCE_SHA:0:7}-run${GITHUB_RUN_ID}"
+          ASSET="$(bash apps/xenterm/tool/package_desktop.sh "$PACKAGE_LABEL" | tail -n 1)"
+          test "$ASSET" = "xenterm-${PACKAGE_LABEL}-linux-x86_64-desktop.tar.gz"
+          file apps/xenterm/build/linux/x64/release/bundle/xenterm \
+            apps/xenterm/build/linux/x64/release/bundle/lib/libxenterm_bridge.so | tee "$GITHUB_WORKSPACE/evidence/elf-architectures.log"
+          ! ldd apps/xenterm/build/linux/x64/release/bundle/lib/libxenterm_bridge.so | grep 'not found'
+          sha256sum "$ASSET" | tee "$GITHUB_WORKSPACE/evidence/SHA256SUMS"
+          printf '{"source_sha":"%s","core_version":"%s","platform":"linux-x86_64","official_release":false}\n' \
+            "$SOURCE_SHA" "$XT_VERSION" > "$GITHUB_WORKSPACE/evidence/BUILD.json"
+          echo "LINUX_ASSET=$GITHUB_WORKSPACE/source/$ASSET" >> "$GITHUB_ENV"
+          git diff --exit-code
+      - name: Prepare test host and verify SDK-only dependency closure
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          control="$GITHUB_WORKSPACE/control/.github/scripts/flutter-ui"
+          python3 "$control/prepare_test_host.py" source/apps/xenterm "$RUNNER_TEMP/integration-host" "$control"
+          cd "$RUNNER_TEMP/integration-host"
+          flutter pub get
+          flutter pub deps --json > "$GITHUB_WORKSPACE/evidence/test-host-deps.json"
+          python3 "$control/verify_test_host.py" "$GITHUB_WORKSPACE/source/apps/xenterm" "$PWD" \
+            "$GITHUB_WORKSPACE/evidence/test-host-deps.json" "$GITHUB_WORKSPACE/evidence/test-host-source-lock-proof.json"
+          dart analyze --fatal-infos integration_test
+      - name: Execute real release smoke and native GTK mouse keyboard clipboard flows
+        timeout-minutes: 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s '-screen 0 1920x1200x24' dbus-run-session -- \
+            bash control/.github/scripts/flutter-ui/run_native_linux.sh \
+            "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/integration-host" \
+            "$GITHUB_WORKSPACE/control/.github/scripts/flutter-ui" "$GITHUB_WORKSPACE/evidence" "$SOURCE_SHA"
+          git -C source diff --exit-code
+      - name: Preserve allowlisted public test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 5
+        with:
+          name: linux-native-evidence-${{ github.run_id }}
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload unofficial Linux test package only after every native gate
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 5
+        with:
+          name: linux-ui-test-package-${{ github.run_id }}
+          path: ${{ env.LINUX_ASSET }}
+          retention-days: 14
+          if-no-files-found: error
