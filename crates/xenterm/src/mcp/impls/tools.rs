@@ -4,6 +4,113 @@ use serde_json::{json, Value};
 pub(super) fn definitions() -> Value {
     json!([
         {
+            "name": "get_settings",
+            "description": "Read non-secret application settings and an opaque revision from the explicitly selected profile. Requires MCP enabled. Does not expose sessions, credentials or permission-setting fields.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        },
+        {
+            "name": "update_settings",
+            "description": "Update a strict subset of non-secret settings using the expected_revision returned by get_settings. Requires an explicit profile and MCP enabled. This version reuses configuration-change authorization: both --allow-config-import and configured file-transfer permission are required. Never changes permissions or credentials. Returns the committed settings snapshot; conflicts require reload and user review, not blind retry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "object",
+                        "properties": {
+                            "session_logs": {
+                                "type": "boolean"
+                            },
+                            "cursor_style": {
+                                "type": "string",
+                                "enum": [
+                                    "block",
+                                    "bar",
+                                    "underline"
+                                ]
+                            },
+                            "line_spacing": {
+                                "type": "number",
+                                "minimum": 0.8,
+                                "maximum": 1.5
+                            },
+                            "padding": {
+                                "type": "boolean"
+                            },
+                            "bold": {
+                                "type": "boolean"
+                            },
+                            "sftp_follow_cd": {
+                                "type": "boolean"
+                            },
+                            "download_dir": {
+                                "type": "string",
+                                "maxLength": 4096
+                            },
+                            "language": {
+                                "type": "string",
+                                "enum": [
+                                    "system",
+                                    "en",
+                                    "zh"
+                                ]
+                            },
+                            "theme_pref": {
+                                "type": "string",
+                                "enum": [
+                                    "system",
+                                    "dark",
+                                    "light"
+                                ]
+                            },
+                            "font_family": {
+                                "type": "string",
+                                "maxLength": 256
+                            },
+                            "font_size": {
+                                "type": "integer",
+                                "minimum": 8,
+                                "maximum": 32
+                            },
+                            "ui_font_family": {
+                                "type": "string",
+                                "maxLength": 256
+                            },
+                            "ui_font_size": {
+                                "type": "integer",
+                                "minimum": 8,
+                                "maximum": 32
+                            }
+                        },
+                        "additionalProperties": false
+                    },
+                    "expected_revision": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "patch",
+                    "expected_revision"
+                ],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            }
+        },
+        {
             "name": "get_access_policy",
             "description": "Read the configured MCP access mode and effective permissions without changing them. Full access permits SSH commands and file operations; restricted access follows configured capability rules. Execution history is optional and off by default. SSH account and server permissions always apply. Contains no credentials. Access mode can only be changed locally in Settings > MCP & permissions or with xenterm cli permissions.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
@@ -147,5 +254,20 @@ mod tests {
         assert!(!text.contains("\"password\":"));
         assert!(!text.contains("\"private_key_inline\":"));
         assert!(text.contains("run_command"));
+    }
+
+    #[test]
+    fn settings_tools_describe_strict_schema_and_existing_write_authorization() {
+        let definitions = definitions();
+        let tools = definitions.as_array().unwrap();
+        let update = tools.iter().find(|v| v["name"] == "update_settings").unwrap();
+        let schema = &update["inputSchema"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["patch"]["additionalProperties"], false);
+        assert_eq!(schema["properties"]["patch"]["properties"].as_object().unwrap().len(), 13);
+        assert!(update["description"].as_str().unwrap().contains("--allow-config-import"));
+        assert!(update["description"].as_str().unwrap().contains("file-transfer"));
+        assert_eq!(update["annotations"]["readOnlyHint"], false);
+        assert!(schema["properties"]["patch"]["properties"].get("mcp_enabled").is_none());
     }
 }

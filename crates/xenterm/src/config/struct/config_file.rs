@@ -114,7 +114,9 @@ pub struct ConfigFile {
     /// a meta line, output chunks, an end line).
     #[serde(default)]
     pub session_logs: bool,
-    /// UI language code: "zh" (default) or "en".
+    /// UI language preference: "system", "zh" or "en". Empty remains the
+    /// historical on-disk default: the legacy language() getter interprets it
+    /// as zh, while the shared settings service interprets it as system.
     #[serde(default)]
     pub language: String,
     /// Theme preference: "system" (default) | "dark" | "light".
@@ -130,6 +132,18 @@ pub struct ConfigFile {
     /// Terminal font size in px. 0 = the built-in default.
     #[serde(default)]
     pub font_size: u32,
+    /// Flutter interface font; independent of terminal font, panel zoom and UI scale.
+    /// Empty = platform default. These additive fields do not reinterpret GPUI settings.
+    #[serde(default)]
+    pub ui_font_family: String,
+    /// Interface font size in logical pixels. 0 = the built-in default (14).
+    #[serde(default)]
+    pub ui_font_size: u32,
+    /// Keys explicitly written through the shared settings service. Older
+    /// serialized defaults do not prove a user choice; never infer migration
+    /// permission from this list or silently overwrite legacy preferences.
+    #[serde(default)]
+    pub settings_explicit_fields: Vec<String>,
     /// Terminal line-height multiplier. 0 means the default 1.0.
     #[serde(default)]
     pub terminal_line_spacing: f32,

@@ -2245,7 +2245,14 @@ CREATE TABLE IF NOT EXISTS command_history (seq INTEGER PRIMARY KEY AUTOINCREMEN
                 let enc = Self::encrypt(&key, settings.webdav_password.as_str())?;
                 settings.webdav_password = Secret::new(enc);
             }
-            let blob = serde_json::to_string(&settings)?;
+            // Preserve fields from newer writers without importing them into
+            // ConfigFile (and accidentally adding them to portable exports).
+            // This read/merge runs under the same transaction and OCC check as
+            // the write: it is not a last-writer-wins reload of stale settings.
+            let previous: Option<String> = tx.query_row(
+                "SELECT value FROM meta WHERE key = 'settings'", [], |row| row.get(0),
+            ).optional()?;
+            let blob = settings::merge_settings_blob(previous.as_deref(), &settings)?;
             for (k, v) in [
                 ("schema_version", Self::SCHEMA_VERSION.to_string()),
                 ("settings", blob),
@@ -2766,6 +2773,10 @@ mod import;
 mod native_sync;
 #[path = "persistence.rs"]
 mod persistence;
+
+#[path = "settings.rs"]
+mod settings;
+pub use settings::{SettingsPatch, SettingsSnapshot};
 #[path = "execution_log.rs"]
 mod execution_log;
 #[path = "profile_io.rs"]

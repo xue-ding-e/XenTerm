@@ -11,6 +11,7 @@ pub(crate) enum CliCommand {
     Upload,
     Download,
     Permissions,
+    Settings,
     Help,
 }
 
@@ -28,6 +29,7 @@ impl CliCommand {
             "upload" => Some(Self::Upload),
             "download" => Some(Self::Download),
             "permissions" => Some(Self::Permissions),
+            "settings" => Some(Self::Settings),
             "help" | "--help" | "-h" => Some(Self::Help),
             _ => None,
         }
