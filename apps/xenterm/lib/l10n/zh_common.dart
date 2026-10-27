@@ -11,6 +11,16 @@ const Map<String, String> zhCommon = <String, String>{
   'Logs': '日志',
   'Settings': '设置',
 
+  'Refresh shared settings': '刷新共享设置',
+  'Could not load shared settings': '无法读取共享设置',
+  'Previous interface preferences': '旧版界面偏好',
+  'Old preferences are preserved. Nothing is imported automatically.':
+      '旧偏好仍保留，不会自动覆盖共享设置。',
+  'Hide previous preferences': '收起旧偏好',
+  'Review previous preferences': '查看旧偏好',
+  'Previous: {previous} · Shared: {current}': '旧值：{previous} · 共享值：{current}',
+  'Apply selected preferences': '应用选中的偏好',
+
   // Settings search and explicit font scopes.
   'Search settings': '搜索设置',
   'Clear search': '清除搜索',
@@ -88,6 +98,13 @@ const Map<String, String> zhCommon = <String, String>{
   'Import sessions (JSON)': '导入会话 (JSON)',
   'Exports carry every saved host; secrets are written in the portable encrypted form. Importing never overwrites existing sessions — new ones are appended.':
       '导出包含全部已保存主机，密钥使用可移植加密形式写入；导入不会覆盖已有会话，只追加新会话。',
+
+  'Copy selected text; otherwise interrupt the running command':
+      '有选中文字时复制；否则中断正在运行的命令',
+  'Paste clipboard text with safety review': '粘贴剪贴板文字（按安全策略确认）',
+  'Copy / paste on macOS': 'macOS 复制 / 粘贴',
+  'Copy / paste on Windows and Linux': 'Windows 和 Linux 复制 / 粘贴',
+  'Search settings (while in Settings)': '搜索设置（在设置页面中）',
 
   // Shortcuts tab.
   'Keyboard shortcuts': '键盘快捷键',

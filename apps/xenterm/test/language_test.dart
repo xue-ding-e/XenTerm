@@ -3,14 +3,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xenterm_app/l10n/app_language.dart';
 import 'package:xenterm_app/main.dart';
-import 'package:xenterm_app/terminal/core_settings.dart';
+import 'support/shared_settings_fixture.dart';
 import 'package:xenterm_app/theme/app_fonts.dart';
 
 const _languageKey = 'xenterm.language';
+late SettingsFixture fixture;
 
 Future<void> _pumpApp(WidgetTester tester) async {
   final fonts = AppFonts();
-  final settings = CoreSettingsController()..loaded = true;
+  final settings = fixture.controller();
   addTearDown(fonts.dispose);
   addTearDown(settings.dispose);
   await tester.pumpWidget(
@@ -33,10 +34,11 @@ void _setLocales(WidgetTester tester, List<Locale> locales) {
 void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+    fixture = SettingsFixture();
   });
 
-  // These tests use only the pre-fix public app API. The Chinese startup case
-  // therefore fails on the old implementation by assertion, not compilation.
+  // Locale resolution remains a Flutter adapter; explicit choices and restart
+  // state now come from the shared-service snapshot, not private preferences.
   const systemCases = <String, (List<Locale>, String)>{
     'zh-CN': ([Locale('zh', 'CN')], 'zh'),
     'zh-Hans': (
@@ -67,7 +69,7 @@ void main() {
 
   for (final code in ['en', 'zh']) {
     testWidgets('saved $code takes priority over the system', (tester) async {
-      SharedPreferences.setMockInitialValues({_languageKey: code});
+      fixture.values['language'] = code;
       addTearDown(tester.platformDispatcher.clearLocalesTestValue);
       _setLocales(tester, [Locale(code == 'en' ? 'zh' : 'en')]);
       await _pumpApp(tester);
@@ -77,7 +79,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(_language(tester).code, code);
       final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString(_languageKey), code);
+      expect(prefs.containsKey(_languageKey), isFalse);
+      expect(fixture.values['language'], code);
     });
   }
 
@@ -132,7 +135,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(_language(tester).code, 'en');
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString(_languageKey), 'en');
+    expect(prefs.containsKey(_languageKey), isFalse);
+    expect(fixture.values['language'], 'en');
 
     _setLocales(tester, [const Locale('zh')]);
     await tester.pumpAndSettle();
@@ -155,7 +159,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(_language(tester).code, 'en');
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString(_languageKey), 'en');
+    expect(prefs.containsKey(_languageKey), isFalse);
+    expect(fixture.values['language'], 'en');
   });
 
   testWidgets('an unsupported manual value does not disable automatic mode', (
@@ -164,6 +169,7 @@ void main() {
     addTearDown(tester.platformDispatcher.clearLocalesTestValue);
     _setLocales(tester, [const Locale('en')]);
     await _pumpApp(tester);
+    fixture.rejectNext = 'invalid language';
     _language(tester).onChanged('invalid');
     await tester.pumpAndSettle();
 

@@ -216,8 +216,8 @@ class TerminalToolsPanel extends StatelessWidget {
                 icon: LucideIcons.minus,
                 size: 30,
                 iconSize: 13,
-                onPressed: () =>
-                    fonts.setTerminalSize(fonts.terminalSize - 1),
+                onPressed: !fonts.saving && fonts.terminalSize > 8
+                    ? () => fonts.setTerminalSize(fonts.terminalSize - 1) : null,
               ),
               SizedBox(
                 width: 34,
@@ -235,8 +235,8 @@ class TerminalToolsPanel extends StatelessWidget {
                 icon: LucideIcons.plus,
                 size: 30,
                 iconSize: 13,
-                onPressed: () =>
-                    fonts.setTerminalSize(fonts.terminalSize + 1),
+                onPressed: !fonts.saving && fonts.terminalSize < 32
+                    ? () => fonts.setTerminalSize(fonts.terminalSize + 1) : null,
               ),
             ],
           ),

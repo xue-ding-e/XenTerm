@@ -7,9 +7,9 @@ import 'zh_terminal.dart';
 
 /// UI language lives above the shell so every page can read the same choice.
 ///
-/// An explicit choice is persisted by the app root (`main.dart`) in
-/// `SharedPreferences` under `xenterm.language`; without one, the app follows
-/// the system language. Translations are literal maps
+/// The shared Rust settings service persists `system`, `en` or `zh`; the
+/// app root resolves `system` through the platform locale list. Legacy Flutter
+/// preferences remain available only as an explicit import preview. Translations are literal maps
 /// split by area (one file per screen group) so screens can be translated
 /// independently; the English source string is the key and also the fallback.
 ///

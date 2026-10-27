@@ -75,7 +75,15 @@ void main() {
                     onThemeChanged: (_) {},
                     fonts: fonts,
                     settings: controller,
-                    saveSettings: (_) async => null,
+                    saveSettings: (values) async {
+                      final code = values['language'];
+                      if (code is String) setState(() {
+                        language = code;
+                        savedLanguage = code;
+                        controller.settings = CoreSettings(language: code);
+                      });
+                      return null;
+                    },
                   ),
                 ),
               ),
@@ -86,7 +94,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Language'), findsOneWidget);
-      await tester.tap(find.text('English'));
+      await tester.tap(find.text('Follow system'));
       await tester.pumpAndSettle();
       await tester.tap(
         find.descendant(

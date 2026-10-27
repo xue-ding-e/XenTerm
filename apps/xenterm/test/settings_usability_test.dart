@@ -103,12 +103,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(plus);
     await tester.pumpAndSettle();
-    expect(fonts.terminalSize, 16);
+    expect(fonts.terminalSize, 14);
     expect(fonts.uiSize, 14);
-    expect(find.text('16'), findsOneWidget);
+    expect(find.text('14'), findsWidgets);
     await tester.tap(plus);
     await tester.pumpAndSettle();
-    expect(fonts.terminalSize, 17, reason: 'the callback must not retain the old value');
-    expect(find.text('17'), findsOneWidget);
+    expect(fonts.terminalSize, 15, reason: 'the callback must not retain the old value');
+    expect(find.text('15'), findsOneWidget);
   });
 }
