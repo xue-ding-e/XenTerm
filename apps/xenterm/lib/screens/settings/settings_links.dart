@@ -52,7 +52,9 @@ Future<bool> openSettingsLink(
   }
   final uri = Uri.tryParse(url);
   if (uri == null || uri.scheme != 'https' || uri.host != 'github.com' ||
-      uri.userInfo.isNotEmpty || uri.hasPort) return false;
+      uri.userInfo.isNotEmpty || uri.hasPort) {
+    return false;
+  }
   final (executable, arguments) = switch (operatingSystem ?? Platform.operatingSystem) {
     'linux' => ('xdg-open', [url]),
     'macos' => ('/usr/bin/open', [url]),

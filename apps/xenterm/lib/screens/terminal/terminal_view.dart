@@ -728,7 +728,9 @@ class _TerminalViewState extends State<TerminalView>
       final data = await Clipboard.getData(Clipboard.kTextPlain);
       if (!mounted || generation != _clipboardGeneration ||
           !identical(session, _session) || !_canPaste ||
-          !_focus.hasPrimaryFocus) return;
+          !_focus.hasPrimaryFocus) {
+        return;
+      }
       final text = data?.text;
       if (text == null || text.isEmpty) return;
       _submitPaste(session, text, confirmed: false);
@@ -776,7 +778,9 @@ class _TerminalViewState extends State<TerminalView>
     final pending = _pendingPaste;
     if (pending == null || pending.generation != expected.generation ||
         pending.generation != _clipboardGeneration ||
-        !identical(pending.session, expected.session)) return;
+        !identical(pending.session, expected.session)) {
+      return;
+    }
     // Atomically consume this review before sending. Old button callbacks,
     // repeated activation and callbacks retained across cancellation are inert.
     _dismissClipboard();
@@ -1011,7 +1015,9 @@ class _TerminalViewState extends State<TerminalView>
                       _selectionAnchor = null;
                       // A drag that predates a menu/review must not revoke it.
                       if (_pendingPaste == null && _clipboardError == null &&
-                          _contextMenuPosition == null) _copySelection();
+                          _contextMenuPosition == null) {
+                        _copySelection();
+                      }
                     },
                     onPanCancel: () => _selectionAnchor = null,
                     onSecondaryTapDown: (details) => _openClipboardMenu(details.globalPosition),

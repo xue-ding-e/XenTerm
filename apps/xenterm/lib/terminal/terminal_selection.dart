@@ -104,11 +104,15 @@ bool sameTerminalSelectionContent(
     final a = left[index];
     final b = right[index];
     if (a is! Map || b is! Map || a['text'] != b['text'] ||
-        a['wrapped'] != b['wrapped']) return false;
+        a['wrapped'] != b['wrapped']) {
+      return false;
+    }
     final aOffsets = a['cellOffsets'];
     final bOffsets = b['cellOffsets'];
     if (aOffsets is! List || bOffsets is! List ||
-        aOffsets.length != bOffsets.length) return false;
+        aOffsets.length != bOffsets.length) {
+      return false;
+    }
     for (var cell = 0; cell < aOffsets.length; cell++) {
       if (aOffsets[cell] != bOffsets[cell]) return false;
     }

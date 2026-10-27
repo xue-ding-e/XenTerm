@@ -77,11 +77,13 @@ void main() {
                     settings: controller,
                     saveSettings: (values) async {
                       final code = values['language'];
-                      if (code is String) setState(() {
-                        language = code;
-                        savedLanguage = code;
-                        controller.settings = CoreSettings(language: code);
-                      });
+                      if (code is String) {
+                        setState(() {
+                          language = code;
+                          savedLanguage = code;
+                          controller.settings = CoreSettings(language: code);
+                        });
+                      }
                       return null;
                     },
                   ),

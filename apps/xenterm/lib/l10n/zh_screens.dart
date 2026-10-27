@@ -33,7 +33,6 @@ const Map<String, String> zhScreens = <String, String>{
   'Key removed from its hosts': '已从使用它的主机中移除密钥',
 
   // Known hosts screen.
-  'Refresh': '刷新',
   '{shown} of {total} known hosts': '显示 {shown} / {total} 条已知主机',
   'Copy address': '复制地址',
   'Copy fingerprint': '复制指纹',
