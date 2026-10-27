@@ -1,0 +1,201 @@
+name: Bridge loader Dart-only validation
+
+on:
+  push:
+    branches: [validation/bridge-loader-paths]
+    paths: [.github/workflows/bridge-loader-validation.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-loader-dart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge-loader:
+    if: github.repository == 'xue-ding-e/XenTerm' && github.ref == 'refs/heads/validation/bridge-loader-paths'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the exact upstream baseline
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ixbaicn/XenTerm
+          ref: 498c57eb50516734b8c6ce208247251c83221cbe
+          path: upstream-source
+          persist-credentials: false
+
+      - name: Check out the exact two-file fix
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: xue-ding-e/XenTerm
+          ref: a1baa7d2bb87b2e65202cb4eee4e985c142d553d
+          path: fixed-source
+          persist-credentials: false
+
+      - name: Install the pinned Dart SDK only
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1
+        with:
+          sdk: 3.13.5
+
+      - name: Prepare isolated packages from the actual source files
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          upstream = root / 'upstream-source/apps/xenterm'
+          fixed = root / 'fixed-source/apps/xenterm'
+          packages = Path(os.environ['RUNNER_TEMP']) / 'bridge-loader-validation'
+          source_hashes = {}
+          test = (fixed / 'test/native_bridge_path_test.dart').read_text()
+          original_import = "import 'package:flutter_test/flutter_test.dart';"
+          assert test.count(original_import) == 1
+          test = test.replace(original_import, "import 'package:test/test.dart';")
+          # This exact first test uses the existing API in both revisions. The
+          # expected baseline failure must be an assertion, not a missing API.
+          marker = "  test('macOS uses Frameworks before"
+          assert test.count(marker) == 1
+          baseline_test = test.split(marker, 1)[0] + '}\n'
+          assert 'NativeBridge.libraryPathForExecutable(executable, name)' in baseline_test
+          assert (upstream / 'lib/data/hosts.dart').read_bytes() == (fixed / 'lib/data/hosts.dart').read_bytes()
+          for name, source, tests in [('before', upstream, baseline_test), ('after', fixed, test)]:
+              package = packages / name
+              (package / 'lib/bridge').mkdir(parents=True)
+              (package / 'lib/data').mkdir(parents=True)
+              (package / 'test').mkdir(parents=True)
+              for relative in ('lib/bridge/native_bridge.dart', 'lib/data/hosts.dart'):
+                  original = source / relative
+                  copied = package / relative
+                  shutil.copyfile(original, copied)
+                  assert copied.read_bytes() == original.read_bytes()
+                  digest = hashlib.sha256(copied.read_bytes()).hexdigest()
+                  source_hashes[f'{name}/{relative}'] = digest
+                  print(name, relative, 'sha256:', digest)
+              (package / 'test/native_bridge_path_test.dart').write_text(tests)
+              if name == 'after':
+                  assert tests.replace("import 'package:test/test.dart';", original_import) == (fixed / 'test/native_bridge_path_test.dart').read_text()
+              (package / 'pubspec.yaml').write_text(
+                  "name: xenterm_app\npublish_to: none\nenvironment:\n"
+                  "  sdk: '>=3.13.5 <4.0.0'\ndependencies:\n  ffi: 2.2.0\n"
+                  "dev_dependencies:\n  test: 1.33.0\n"
+              )
+          (packages / 'source-sha256.json').write_text(json.dumps(source_hashes, indent=2) + '\n')
+          PY
+
+      - name: Resolve only the isolated Dart dependencies
+        run: |
+          set -euo pipefail
+          dart --version 2>&1 | tee "$RUNNER_TEMP/bridge-loader-validation/sdk-version.log"
+          grep -F 'Dart SDK version: 3.13.5 ' "$RUNNER_TEMP/bridge-loader-validation/sdk-version.log"
+          for variant in before after; do
+            (cd "$RUNNER_TEMP/bridge-loader-validation/$variant" && dart pub get)
+          done
+
+      - name: Verify the baseline fails the same path assertion
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          package = Path(os.environ['RUNNER_TEMP']) / 'bridge-loader-validation/before'
+          result = subprocess.run(
+              ['dart', 'test', '--reporter=json', 'test/native_bridge_path_test.dart'],
+              cwd=package, text=True, capture_output=True,
+          )
+          (package.parent / 'before-results.jsonl').write_text(result.stdout)
+          print(result.stdout)
+          print(result.stderr)
+          events = []
+          for line in result.stdout.splitlines():
+              try:
+                  events.append(json.loads(line))
+              except json.JSONDecodeError:
+                  pass
+          target = 'bridge primary path matches the released desktop bundle'
+          tests = [event['test'] for event in events
+                   if event.get('type') == 'testStart' and event['test']['name'] == target]
+          assert result.returncode == 1, f'Expected assertion-failure exit 1, got {result.returncode}'
+          assert len(tests) == 1, 'The regression test did not execute exactly once'
+          errors = [event for event in events
+                    if event.get('type') == 'error' and event.get('testID') == tests[0]['id']]
+          assert len(errors) == 1 and errors[0]['isFailure'] is True, errors
+          assert len([event for event in events if event.get('type') == 'error']) == 1
+          completed = [event for event in events
+                       if event.get('type') == 'testDone' and not event['hidden']]
+          assert len(completed) == 1 and completed[0]['testID'] == tests[0]['id']
+          assert completed[0]['result'] == 'failure' and not completed[0]['skipped']
+          assert not completed[0].get('retried', False)
+          assert events[-1]['type'] == 'done' and events[-1]['success'] is False
+          message = errors[0]['error']
+          for expected in ('Expected:', 'Actual:', '/bundle/lib/libxenterm_bridge.so', '/bundle/libxenterm_bridge.so'):
+              assert expected in message, (expected, message)
+          print('PASS: baseline failed specifically because its path misses bundle/lib')
+          PY
+
+      - name: Analyze the actual fixed bridge in the isolated Dart package
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/bridge-loader-validation/after"
+          dart analyze --fatal-infos 2>&1 | tee "$RUNNER_TEMP/bridge-loader-validation/analysis.log"
+
+      - name: Run all synthetic loader regressions against the actual fix
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          package = Path(os.environ['RUNNER_TEMP']) / 'bridge-loader-validation/after'
+          result = subprocess.run(
+              ['dart', 'test', '--reporter=json', 'test/native_bridge_path_test.dart'],
+              cwd=package, text=True, capture_output=True,
+          )
+          (package.parent / 'after-results.jsonl').write_text(result.stdout)
+          print(result.stdout)
+          print(result.stderr)
+          events = []
+          for line in result.stdout.splitlines():
+              try:
+                  events.append(json.loads(line))
+              except json.JSONDecodeError:
+                  pass
+          assert result.returncode == 0, f'Fixed tests exited {result.returncode}'
+          assert not [event for event in events if event.get('type') == 'error']
+          completed = [event for event in events
+                       if event.get('type') == 'testDone' and not event['hidden']]
+          assert len(completed) == 18, f'Expected 18 completed tests, got {len(completed)}'
+          assert all(event['result'] == 'success' and not event['skipped']
+                     and not event.get('retried', False) for event in completed)
+          assert events[-1]['type'] == 'done' and events[-1]['success'] is True
+          print('PASS: all 18 fixed-source synthetic tests passed, without skips or retries')
+          PY
+
+      - name: Preserve SDK, dependency locks, source hashes and test events
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bridge-loader-dart-evidence
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/bridge-loader-validation/sdk-version.log
+            ${{ runner.temp }}/bridge-loader-validation/source-sha256.json
+            ${{ runner.temp }}/bridge-loader-validation/before/pubspec.lock
+            ${{ runner.temp }}/bridge-loader-validation/after/pubspec.lock
+            ${{ runner.temp }}/bridge-loader-validation/before-results.jsonl
+            ${{ runner.temp }}/bridge-loader-validation/after-results.jsonl
+            ${{ runner.temp }}/bridge-loader-validation/analysis.log
