@@ -78,25 +78,36 @@ class NativeBridge {
 
   static NativeBridge? _instance;
   static bool _attempted = false;
+  static NativeBridgeError? _loadError;
 
-  /// Loads the bridge library next to the executable (or from
-  /// `XENTERM_BRIDGE_PATH`). Returns null when it is not present so the UI can
-  /// show a clear error instead of crashing at startup.
+  /// The loader failure, including its path and the original OS error. A
+  /// dependency, architecture or signature failure is not a missing bridge.
+  static NativeBridgeError get loadError =>
+      _loadError ?? const NativeBridgeError('xenterm_bridge is unavailable');
+
+  /// Loads the bridge from the platform's desktop bundle (or from
+  /// `XENTERM_BRIDGE_PATH`). Returns null on failure so the UI can show
+  /// [loadError] instead of crashing at startup.
   static NativeBridge? tryLoad() {
     if (_attempted) return _instance;
     _attempted = true;
     try {
-      final override = Platform.environment['XENTERM_BRIDGE_PATH'];
-      final lib = override != null && override.isNotEmpty
-          ? DynamicLibrary.open(override)
-          : DynamicLibrary.open(
-              libraryPathForExecutable(
-                Platform.resolvedExecutable,
-                _defaultName(),
-              ),
-            );
+      final lib = loadLibrary(
+        executable: Platform.resolvedExecutable,
+        name: _defaultName(),
+        overridePath: Platform.environment['XENTERM_BRIDGE_PATH'],
+        openLibrary: DynamicLibrary.open,
+        // A directory or broken symlink is a broken candidate, not permission
+        // to fall back to a possibly stale bridge beside the executable.
+        libraryExists: (path) =>
+            FileSystemEntity.typeSync(path, followLinks: false) !=
+            FileSystemEntityType.notFound,
+      );
       _instance = NativeBridge._(lib);
-    } catch (_) {
+    } catch (error) {
+      _loadError = error is NativeBridgeError
+          ? error
+          : NativeBridgeError('Could not load xenterm_bridge: $error');
       _instance = null;
     }
     return _instance;
@@ -109,10 +120,72 @@ class NativeBridge {
   }
 
   /// Linux's loader does not search the working directory for a bare library
-  /// name, even when the library sits next to the executable. Resolve it from
-  /// the executable's own directory so a bundle launched from anywhere works.
+  /// name. Resolve only known bundle locations from the executable itself,
+  /// matching tool/bundle_native.sh. Prefer the packaged location over the
+  /// adjacent layout still produced by tool/build_native.sh for local builds.
+  static List<String> libraryPathsForExecutable(
+    String executable,
+    String name, {
+    String? operatingSystem,
+  }) {
+    final os = operatingSystem ?? Platform.operatingSystem;
+    final windows = os == 'windows';
+    final uri = Uri.file(executable, windows: windows);
+    final segments = uri.pathSegments;
+    final inMacBundle =
+        segments.length >= 4 &&
+        segments[segments.length - 4].endsWith('.app') &&
+        segments[segments.length - 3] == 'Contents' &&
+        segments[segments.length - 2] == 'MacOS';
+    return [
+      if (os == 'macos' && inMacBundle)
+        uri.resolve('../Frameworks/$name').toFilePath(windows: windows),
+      if (os == 'linux')
+        uri.resolve('lib/$name').toFilePath(windows: windows),
+      uri.resolve(name).toFilePath(windows: windows),
+    ];
+  }
+
+  /// The primary packaged location. Keep this path-only helper available to
+  /// callers; loading also supports the adjacent local-build fallback above.
   static String libraryPathForExecutable(String executable, String name) =>
-      File(executable).parent.uri.resolve(name).toFilePath();
+      libraryPathsForExecutable(executable, name).first;
+
+  /// Opens the first existing trusted candidate, not the first one that
+  /// happens to load. A present but broken packaged bridge must not silently
+  /// fall back to a stale local-build library. Callbacks keep path/failure
+  /// regressions independent of a native toolchain or real user libraries.
+  static T loadLibrary<T>({
+    required String executable,
+    required String name,
+    required T Function(String) openLibrary,
+    required bool Function(String) libraryExists,
+    String? operatingSystem,
+    String? overridePath,
+  }) {
+    final hasOverride = overridePath != null && overridePath.isNotEmpty;
+    final paths = overridePath != null && overridePath.isNotEmpty
+        ? [overridePath]
+        : libraryPathsForExecutable(
+            executable,
+            name,
+            operatingSystem: operatingSystem,
+          );
+    for (final path in paths) {
+      try {
+        // An explicit override remains authoritative, including the loader's
+        // own interpretation of the path. Never fall back after its failure.
+        if (hasOverride || libraryExists(path)) return openLibrary(path);
+      } catch (error) {
+        throw NativeBridgeError(
+          'Could not load xenterm_bridge from "$path": $error',
+        );
+      }
+    }
+    throw NativeBridgeError(
+      'xenterm_bridge library not found. Searched: ${paths.join(', ')}',
+    );
+  }
 
   late final _PtrFn _version = _lib.lookupFunction<_PtrFnC, _PtrFn>(
     'xenterm_core_version',
@@ -690,9 +763,7 @@ Future<List<QuickCommand>> loadQuickCommandsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.quickCommandsJson();
     if (raw == null) {
@@ -718,9 +789,7 @@ Future<CoreWriteResult> saveQuickCommandToCore({
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.upsertQuickCommand({
       'index': index,
@@ -747,9 +816,7 @@ Future<CoreWriteResult> deleteQuickCommandFromCore(int index) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.deleteQuickCommand(index);
     if (result['ok'] != true) {
@@ -953,9 +1020,7 @@ Future<List<SessionLogEntry>> loadSessionLogsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.logsJson();
     if (raw == null) {
@@ -972,9 +1037,7 @@ Future<SessionLogContent> readSessionLogFromCore(String file) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.readLog(file);
     if (result['ok'] != true) {
@@ -997,9 +1060,7 @@ Future<CoreWriteResult> deleteSessionLogFromCore(String file) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.deleteLog(file);
     if (result['ok'] != true) {
@@ -1047,9 +1108,7 @@ Future<CoreSettings> loadSettingsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.settingsJson();
     if (raw == null) {
@@ -1065,9 +1124,7 @@ Future<CoreWriteResult> saveSettingsToCore(Map<String, dynamic> values) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.setSettings(values);
     if (result['ok'] != true) {
@@ -1130,9 +1187,7 @@ Future<List<KeyInfo>> loadKeysFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.keysJson();
     if (raw == null) {
@@ -1152,9 +1207,7 @@ Future<CoreWriteResult> updateKeyInCore({
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.updateKey(oldPath, newPath);
     return CoreWriteResult(
@@ -1168,9 +1221,7 @@ Future<CoreWriteResult> deleteKeyFromCore(String path) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.deleteKey(path);
     return CoreWriteResult(
@@ -1231,9 +1282,7 @@ Future<List<ForwardRule>> loadForwardsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.forwardsJson();
     if (raw == null) {
@@ -1280,9 +1329,7 @@ Future<List<JumpChain>> loadJumpChainsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.jumpChainsJson();
     if (raw == null) {
@@ -1312,9 +1359,7 @@ Future<CoreWriteResult> saveForwardToCore({
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.upsertForward({
       'session_id': sessionId,
@@ -1346,9 +1391,7 @@ Future<CoreWriteResult> deleteForwardFromCore({
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.deleteForward({
       'session_id': sessionId,
@@ -1396,9 +1439,7 @@ Future<List<KnownHost>> loadKnownHostsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.knownHostsJson();
     if (raw == null) {
@@ -1416,9 +1457,7 @@ Future<CoreWriteResult> deleteKnownHostFromCore(String id) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.deleteKnownHost(id);
     if (result['ok'] != true) {
@@ -1438,9 +1477,7 @@ Future<List<Host>> loadHostsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.sessionsJson();
     if (raw == null) {
@@ -1475,9 +1512,7 @@ Future<List<SerialPortInfo>> loadSerialPortsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.serialPortsJson();
     if (raw == null) {
@@ -1518,9 +1553,7 @@ Future<CoreWriteResult> saveSessionToCore({
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.upsertSession({
       'id': id,
@@ -1557,9 +1590,7 @@ Future<CoreWriteResult> deleteSessionFromCore(String id) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.deleteSession(id);
     return CoreWriteResult(
@@ -1635,9 +1666,7 @@ Future<ProfileExport> exportProfileFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.profileExport();
     if (result['ok'] != true) {
@@ -1671,9 +1700,7 @@ Future<ProfileImportResult> importProfileToCore(
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.profileImport(json, dryRun);
     if (result['ok'] != true) {
@@ -1707,9 +1734,7 @@ Future<List<HostGroup>> loadGroupsFromCore() {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final raw = bridge.groupsJson();
     if (raw == null) {
@@ -1726,9 +1751,7 @@ Future<CoreWriteResult> createGroupInCore(String name) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.createGroup(name);
     return CoreWriteResult(
@@ -1742,9 +1765,7 @@ Future<CoreWriteResult> renameGroupInCore(String old, String next) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.renameGroup(old, next);
     return CoreWriteResult(
@@ -1758,9 +1779,7 @@ Future<CoreWriteResult> deleteGroupFromCore(String name) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.deleteGroup(name);
     return CoreWriteResult(
@@ -1774,9 +1793,7 @@ Future<CoreWriteResult> collapseGroupInCore(String name, bool collapsed) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.collapseGroup(name, collapsed);
     return CoreWriteResult(
@@ -1790,9 +1807,7 @@ Future<CoreWriteResult> moveSessionToGroupInCore(String id, String group) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.moveSessionToGroup(id, group);
     return CoreWriteResult(
@@ -1824,9 +1839,7 @@ Future<ImportResult> importSshConfigToCore({String text = ''}) {
   return Isolate.run(() {
     final bridge = NativeBridge.tryLoad();
     if (bridge == null) {
-      throw const NativeBridgeError(
-        'xenterm_bridge library not found next to the app',
-      );
+      throw NativeBridge.loadError;
     }
     final result = bridge.importSshConfig(text);
     return ImportResult(
