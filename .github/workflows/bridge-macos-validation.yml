@@ -17,6 +17,9 @@ concurrency:
 env:
   SOURCE_SHA: a1baa7d2bb87b2e65202cb4eee4e985c142d553d
   SOURCE_REF: fix/bridge-bundle-paths
+  # Match the hosted source already recorded in the product lockfile. A
+  # different default host causes pub to re-resolve otherwise locked packages.
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
 
 jobs:
   flutter-checks:
@@ -91,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           flutter --version
-          flutter pub get
+          flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.yaml pubspec.lock
 
       - name: Analyze the complete Flutter application
@@ -205,7 +208,7 @@ jobs:
         working-directory: source/apps/xenterm
         run: |
           set -euo pipefail
-          flutter pub get
+          flutter pub get --enforce-lockfile
           git diff --exit-code -- pubspec.yaml pubspec.lock
           flutter build macos --release --build-name="$APP_SEMVER" --build-number="$APP_BUILD_NUMBER"
 
