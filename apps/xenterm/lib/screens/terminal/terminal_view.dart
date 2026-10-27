@@ -23,6 +23,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 
@@ -253,6 +254,7 @@ class _TerminalViewState extends State<TerminalView>
   String? _clipboardError;
   bool _readingClipboard = false;
   int _clipboardGeneration = 0;
+  int _clipboardOverlayGeneration = 0;
 
   final FocusNode _focus = FocusNode(debugLabel: 'terminal');
   final FocusNode _searchFocus = FocusNode(debugLabel: 'terminal-search');
@@ -689,8 +691,31 @@ class _TerminalViewState extends State<TerminalView>
     _pendingPaste = null;
     _contextMenuPosition = null;
     _clipboardError = null;
-    _clipboardOverlay.hide();
+    // Revoke clipboard work synchronously, even when deactivation happens in
+    // didUpdateWidget. Only the portal's visual update must wait until build
+    // finishes; deferring the revocation could let a stale confirmation send.
+    final generation = ++_clipboardOverlayGeneration;
+    if (_clipboardOverlay.isShowing) {
+      if (SchedulerBinding.instance.schedulerPhase ==
+          SchedulerPhase.persistentCallbacks) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && generation == _clipboardOverlayGeneration) {
+            _clipboardOverlay.hide();
+          }
+        });
+      } else {
+        _clipboardOverlay.hide();
+      }
+    }
     if (restoreFocus && widget.active && _foreground) _focus.requestFocus();
+  }
+
+  void _showClipboardOverlay() {
+    // Clipboard reads/copies have their own generation. Only another visual
+    // transition should supersede a queued hide, and it must not hide a newer
+    // menu, review or error opened earlier in the post-frame callback queue.
+    _clipboardOverlayGeneration++;
+    _clipboardOverlay.show();
   }
 
   void _showClipboardError(Object error) {
@@ -702,7 +727,7 @@ class _TerminalViewState extends State<TerminalView>
       _clipboardError = error is NativeBridgeError ? error.message : '$error';
     });
     _focus.unfocus();
-    _clipboardOverlay.show();
+    _showClipboardOverlay();
   }
 
   bool _copySelection() {
@@ -763,7 +788,7 @@ class _TerminalViewState extends State<TerminalView>
             _pendingPaste = (session: session, text: text, generation: ++_clipboardGeneration);
           });
           _focus.unfocus();
-          _clipboardOverlay.show();
+          _showClipboardOverlay();
         case TerminalPasteResult.rejected:
           throw const NativeBridgeError('Clipboard paste was not accepted by the session');
       }
@@ -792,7 +817,7 @@ class _TerminalViewState extends State<TerminalView>
     _dismissClipboard(restoreFocus: false);
     setState(() => _contextMenuPosition = position);
     _focus.unfocus();
-    _clipboardOverlay.show();
+    _showClipboardOverlay();
   }
 
   Widget _clipboardOverlayBuilder(BuildContext context) {
