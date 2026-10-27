@@ -11,6 +11,28 @@ const Map<String, String> zhCommon = <String, String>{
   'Logs': '日志',
   'Settings': '设置',
 
+  // Settings search and explicit font scopes.
+  'Search settings': '搜索设置',
+  'Clear search': '清除搜索',
+  'Search results': '搜索结果',
+  'Terminal font': '终端字体',
+  'Terminal text size': '终端字号',
+  'Interface font': '界面字体',
+  'Interface text size': '界面字号',
+  'Appearance': '外观',
+  'Follow system': '跟随系统',
+  'Changes terminal characters and the grid, not interface labels.':
+      '调整终端字符和网格大小，不影响界面文字。',
+  'Changes menus and interface labels, not terminal characters.':
+      '调整菜单和界面文字，不影响终端字符。',
+  'Open links in your browser, or use the copy button.':
+      '点击链接在浏览器中打开，也可使用复制按钮。',
+  'Could not open the browser. Use Copy link instead.':
+      '无法打开浏览器，请使用“复制链接”。',
+  'Copy link': '复制链接',
+  'XenTerm contributors': 'XenTerm 贡献者',
+  'Third-party notices': '第三方声明',
+
   // Settings tabs and language picker.
   'Terminal': '终端',
   'SFTP': 'SFTP',

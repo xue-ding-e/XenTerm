@@ -264,6 +264,7 @@ class _TerminalViewState extends State<TerminalView>
     _focus.addListener(_onTerminalFocusChanged);
     widget.commandBus?.addListener(_onCommand);
     widget.settings?.addListener(_onSettings);
+    widget.fonts.addListener(_onSettings);
     WidgetsBinding.instance.addObserver(this);
     windowActivity.idle.addListener(_onWindowActivity);
     _foreground =
@@ -496,6 +497,10 @@ class _TerminalViewState extends State<TerminalView>
       _syncResize(immediate: widget.active);
       _syncPolling();
     }
+    if (oldWidget.fonts != widget.fonts) {
+      oldWidget.fonts.removeListener(_onSettings);
+      widget.fonts.addListener(_onSettings);
+    }
     if (oldWidget.commandBus != widget.commandBus) {
       oldWidget.commandBus?.removeListener(_onCommand);
       widget.commandBus?.addListener(_onCommand);
@@ -510,6 +515,7 @@ class _TerminalViewState extends State<TerminalView>
   void dispose() {
     widget.commandBus?.removeListener(_onCommand);
     widget.settings?.removeListener(_onSettings);
+    widget.fonts.removeListener(_onSettings);
     HardwareKeyboard.instance.removeHandler(_globalKey);
     WidgetsBinding.instance.removeObserver(this);
     windowActivity.idle.removeListener(_onWindowActivity);

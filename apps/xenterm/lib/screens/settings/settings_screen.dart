@@ -20,6 +20,10 @@ import '../../bridge/native_bridge.dart'
 import '../../l10n/app_language.dart';
 import '../../terminal/core_settings.dart';
 import '../../theme/app_fonts.dart';
+import '../../theme/app_appearance.dart';
+import '../../theme/app_field.dart';
+import 'settings_search.dart';
+import 'settings_links.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/primitives.dart';
 
@@ -32,6 +36,9 @@ class SettingsScreen extends StatefulWidget {
   /// Test/alternate persistence hook; defaults to the shared controller.
   final Future<String?> Function(Map<String, dynamic> values)? saveSettings;
 
+  /// Tests intercept link launches; no browser or platform process is started.
+  final Future<bool> Function(String url)? openLink;
+
   const SettingsScreen({
     super.key,
     required this.lightTheme,
@@ -39,6 +46,7 @@ class SettingsScreen extends StatefulWidget {
     required this.fonts,
     required this.settings,
     this.saveSettings,
+    this.openLink,
   });
 
   @override
@@ -136,17 +144,188 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _saveError;
   bool _saving = false;
   String? _copiedLink;
+  String? _failedLink;
   Timer? _copyReset;
+  final _search = TextEditingController();
+  final _searchFocus = FocusNode(debugLabel: 'settings-search');
+  final _scroll = ScrollController();
+  final _targetKeys = <String, GlobalKey>{};
+  final _targetFocus = <String, FocusNode>{};
+  String _query = '';
+  String? _locatedId;
+  int _resultIndex = 0;
+
+  List<SettingsSearchEntry> get _results => searchSettings(
+    _query,
+    AppLanguage.maybeOf(context)?.code ?? 'en',
+  );
+
+  Widget _target(String id, Widget child) => Focus(
+    key: _targetKeys.putIfAbsent(id, () => GlobalKey()),
+    focusNode: _targetFocus.putIfAbsent(
+      id, () => FocusNode(debugLabel: 'setting-$id'),
+    ),
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(XtRadius.field),
+        border: Border.all(
+          color: _locatedId == id
+              ? XtColors.accent(context)
+              : Colors.transparent,
+        ),
+      ),
+      child: child,
+    ),
+  );
+
+  void _searchChanged(String value) => setState(() {
+    _query = value;
+    _resultIndex = 0;
+    _locatedId = null;
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+  });
+
+  void _clearSearch() {
+    _search.clear();
+    _searchChanged('');
+    _searchFocus.requestFocus();
+  }
+
+  void _openResult(SettingsSearchEntry entry) {
+    _search.clear();
+    setState(() {
+      _query = '';
+      _tab = entry.tab;
+      _locatedId = entry.id;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final target = _targetKeys[entry.id]?.currentContext;
+      if (target != null) {
+        Scrollable.ensureVisible(target, alignment: 0.2);
+        _targetFocus[entry.id]?.requestFocus();
+      }
+    });
+  }
+
+  KeyEventResult _searchKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    final command = keyboard.isControlPressed || keyboard.isMetaPressed;
+    if (command && !keyboard.isAltPressed && !keyboard.isShiftPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyF) {
+      _searchFocus.requestFocus();
+      _search.selection = TextSelection(baseOffset: 0, extentOffset: _search.text.length);
+      return KeyEventResult.handled;
+    }
+    // Let the platform IME finish/cancel Chinese composition first.
+    if (_searchFocus.hasFocus && _search.value.composing.isValid &&
+        !_search.value.composing.isCollapsed) return KeyEventResult.ignored;
+    if (event.logicalKey == LogicalKeyboardKey.escape && _query.isNotEmpty) {
+      _clearSearch();
+      return KeyEventResult.handled;
+    }
+    if (!_searchFocus.hasFocus || _query.isEmpty) return KeyEventResult.ignored;
+    final results = _results;
+    if (results.isEmpty) return KeyEventResult.ignored;
+    if (event.logicalKey == LogicalKeyboardKey.arrowDown ||
+        event.logicalKey == LogicalKeyboardKey.arrowUp) {
+      setState(() => _resultIndex = (_resultIndex +
+          (event.logicalKey == LogicalKeyboardKey.arrowDown ? 1 : -1)) % results.length);
+      final resultContext = _targetKeys['result-${results[_resultIndex].id}']?.currentContext;
+      if (resultContext != null) Scrollable.ensureVisible(resultContext);
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.enter) {
+      _openResult(results[(_resultIndex < results.length ? _resultIndex : 0)]);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  List<Widget> _searchResults() {
+    final results = _results;
+    return [
+      _SectionCard(
+        title: results.isEmpty ? 'No matches' : 'Search results',
+        children: [
+          if (results.isEmpty)
+            const _SettingsText('Try a different search.'),
+          for (var i = 0; i < results.length; i++)
+            Focus(
+              key: _targetKeys.putIfAbsent('result-${results[i].id}', () => GlobalKey()),
+              onKeyEvent: (_, event) {
+                if (event is KeyDownEvent &&
+                    (event.logicalKey == LogicalKeyboardKey.enter ||
+                     event.logicalKey == LogicalKeyboardKey.space)) {
+                  _openResult(results[i]);
+                  return KeyEventResult.handled;
+                }
+                return KeyEventResult.ignored;
+              },
+              onFocusChange: (focused) {
+                if (focused) setState(() => _resultIndex = i);
+              },
+              child: Semantics(
+                button: true,
+                selected: i == _resultIndex,
+                child: XtHoverRow(
+                  selected: i == _resultIndex,
+                  padding: const EdgeInsets.all(12),
+                  onTap: () => _openResult(results[i]),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(AppLanguage.tr(context, results[i].label)),
+                      Text(
+                        '${AppLanguage.tr(context, _tabs[results[i].tab])} › '
+                        '${AppLanguage.tr(context, results[i].section)}',
+                        style: Theme.of(context).typography.normal.copyWith(
+                          fontSize: 12,
+                          color: XtColors.textSecondary(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    ];
+  }
 
   @override
   void initState() {
     super.initState();
     widget.settings.addListener(_changed);
+    widget.fonts.addListener(_changed);
     if (!widget.settings.loaded) widget.settings.load();
   }
 
   @override
+  void didUpdateWidget(SettingsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.fonts != widget.fonts) {
+      oldWidget.fonts.removeListener(_changed);
+      widget.fonts.addListener(_changed);
+    }
+    if (oldWidget.settings != widget.settings) {
+      oldWidget.settings.removeListener(_changed);
+      widget.settings.addListener(_changed);
+      if (!widget.settings.loaded) widget.settings.load();
+    }
+  }
+
+  @override
   void dispose() {
+    _search.dispose();
+    _searchFocus.dispose();
+    _scroll.dispose();
+    for (final focus in _targetFocus.values) { focus.dispose(); }
+    widget.fonts.removeListener(_changed);
     _copyReset?.cancel();
     widget.settings.removeListener(_changed);
     super.dispose();
@@ -182,13 +361,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Container(
+    return Focus(
+      autofocus: true,
+      onKeyEvent: _searchKey,
+      child: Container(
       color: XtColors.chrome(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            height: 80,
+            height: 80 * MediaQuery.textScalerOf(context).scale(14) / 14,
             padding: const EdgeInsets.fromLTRB(20, 25, 20, 0),
             decoration: BoxDecoration(
               border: Border(
@@ -206,7 +388,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     color: XtColors.textPrimary(context),
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(width: 24),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: SizedBox(
+                      width: 360,
+                      child: XtField(
+                        key: const ValueKey('settings-search'),
+                        placeholder: AppLanguage.tr(context, 'Search settings'),
+                        controller: _search,
+                        focusNode: _searchFocus,
+                        onChanged: _searchChanged,
+                        onSubmitted: (_) {
+                          if (_search.value.composing.isValid &&
+                              !_search.value.composing.isCollapsed) return;
+                          final results = _results;
+                          if (results.isNotEmpty) {
+                            _openResult(results[(_resultIndex < results.length ? _resultIndex : 0)]);
+                          }
+                        },
+                        leading: const Icon(LucideIcons.search, size: 16),
+                        trailing: _query.isEmpty ? null : XtIconButton(
+                          key: const ValueKey('settings-search-clear'),
+                          icon: LucideIcons.x,
+                          tooltip: AppLanguage.tr(context, 'Clear search'),
+                          onPressed: _clearSearch,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
                 if (_saving)
                   const SizedBox(
                     width: 14,
@@ -225,42 +437,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 return Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Sidebar and content are separate layers: hovering a tab
-                    // never repaints the 700px card column and vice versa.
-                    RepaintBoundary(
-                      child: _TabSidebar(
-                        width: sidebarWidth,
-                        tabs: _tabs,
-                        active: _tab,
-                        onSelect: (i) => setState(() => _tab = i),
-                      ),
-                    ),
+                    // Preserve separate repaint layers while navigating search anchors.
+                    RepaintBoundary(child: _TabSidebar(
+                      width: sidebarWidth,
+                      tabs: _tabs,
+                      active: _tab,
+                      onSelect: (i) {
+                        _search.clear();
+                        setState(() { _tab = i; _query = ''; _locatedId = null; });
+                        if (_scroll.hasClients) _scroll.jumpTo(0);
+                      },
+                    )),
                     Expanded(
-                      child: RepaintBoundary(
-                        child: ColoredBox(
-                          color: XtColors.page(context),
-                          // The content column is capped at 700 and centred;
-                          // the surrounding ListView scrolls so a short window
-                          // never clips the last card, and the horizontal
-                          // padding keeps the card off the window edge at
-                          // narrow widths.
-                          child: ListView(
-                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 60),
-                            children: [
-                              if (_saveError != null)
-                                _SectionCard(
-                                  children: [
-                                    _SettingsText(
-                                      _saveError!,
-                                      color: XtColors.danger(context),
-                                    ),
-                                  ],
-                                ),
-                              ..._contentFor(_tab),
-                            ],
+                      child: RepaintBoundary(child: ColoredBox(
+                        color: XtColors.page(context),
+                        // The content column is capped at 700 and centred; the
+                        // surrounding scroll view keeps every anchor mounted and never
+                        // clips the last card, and the horizontal padding keeps
+                        // the card off the window edge at narrow widths.
+                        child: SingleChildScrollView(
+                          controller: _scroll,
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 60),
+                          child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (_saveError != null)
+                              _SectionCard(
+                                children: [
+                                  _SettingsText(
+                                    _saveError!,
+                                    color: XtColors.danger(context),
+                                  ),
+                                ],
+                              ),
+                            ...(_query.trim().isEmpty ? _contentFor(_tab) : _searchResults()),
+                          ],
                           ),
                         ),
-                      ),
+                      )),
                     ),
                   ],
                 );
@@ -269,15 +483,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+      ),
     );
   }
 
 
-  /// About tab: the real application icon, the canonical build version exactly
-  /// as the Rust core reports it, a compact feature summary and the project
-  /// links. Credits for people are intentionally not surfaced (that list only
-  /// grows and belongs in the repository docs). Tapping a link copies it to the
-  /// clipboard: the app deliberately ships without a URL-launcher dependency.
+  /// About tab: real application/build identity, project links and credits.
+  /// A normal click opens the documented destination; the separate copy action
+  /// remains available when a desktop has no browser association.
+  Future<void> _openLink(String url) async {
+    var opened = false;
+    try {
+      opened = await (widget.openLink?.call(url) ?? openSettingsLink(url));
+    } catch (_) {
+      // A failed platform handler is visible and must not break Settings.
+    }
+    if (mounted) setState(() => _failedLink = opened ? null : url);
+  }
+
   void _copyLink(String label, String url) {
     Clipboard.setData(ClipboardData(text: url));
     _copyReset?.cancel();
@@ -290,13 +513,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Widget> _aboutTab() {
     final theme = Theme.of(context);
     final version = coreVersionSync();
-    const repo = 'https://github.com/ixbaicn/XenTerm';
-    final links = <(String, String, IconData)>[
-      ('Source code', repo, LucideIcons.github),
-      ('Issue tracker', '$repo/issues', LucideIcons.bug),
-      ('Releases', '$repo/releases', LucideIcons.tag),
-      ('License', '$repo/blob/main/LICENSE', LucideIcons.scale),
-    ];
     final features = <(IconData, String, String)>[
       (LucideIcons.server, 'SSH / SFTP', 'File browsing and transfers'),
       (
@@ -308,6 +524,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       (LucideIcons.braces, 'MCP / CLI', 'Automation without a JVM'),
     ];
     return [
+      if (_failedLink != null)
+        _SectionCard(children: [
+          const _SettingsText('Could not open the browser. Use Copy link instead.'),
+          _SettingsText(_failedLink!),
+        ]),
       _SectionCard(
         children: [
           Row(
@@ -418,7 +639,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
         ],
       ),
-      _SectionCard(
+      _target('credits', _SectionCard(
         title: 'Developer & credits',
         children: [
           _SettingsText('Maintained by 小白 and the XenTerm contributors.'),
@@ -428,32 +649,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
             'shadcn_flutter, Rust, russh, rio-vt, Lucide, Simple Icons and '
             'Twemoji.',
           ),
+          for (final link in creditLinks)
+            _LinkRow(
+              label: link.label,
+              url: link.url,
+              icon: LucideIcons.github,
+              copied: _copiedLink == link.url,
+              onTap: () => _openLink(link.url),
+              onCopy: () => _copyLink(link.url, link.url),
+            ),
         ],
-      ),
-      _SectionCard(
+      )),
+      _target('links', _SectionCard(
         title: 'Links',
         children: [
           Padding(
             // Aligned with the link labels below.
             padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
             child: Text(
-              AppLanguage.tr(context, 'Tap a link to copy it to the clipboard.'),
+              AppLanguage.tr(context, 'Open links in your browser, or use the copy button.'),
               style: theme.typography.normal.copyWith(
                 fontSize: 12,
                 color: XtColors.textTertiary(context),
               ),
             ),
           ),
-          for (final (label, url, icon) in links)
+          for (final link in projectLinks)
             _LinkRow(
-              label: label,
-              url: url,
-              icon: icon,
-              copied: _copiedLink == label,
-              onTap: () => _copyLink(label, url),
+              label: link.label,
+              url: link.url,
+              icon: LucideIcons.externalLink,
+              copied: _copiedLink == link.url,
+              onTap: () => _openLink(link.url),
+              onCopy: () => _copyLink(link.url, link.url),
             ),
         ],
-      ),
+      )),
     ];
   }
 
@@ -469,25 +700,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final fonts = widget.fonts;
     final core = _core;
     final language = AppLanguage.maybeOf(context);
+    final appearance = AppAppearance.maybeOf(context);
     return [
       // Language is global, so it sits first: switching it rebuilds the whole
       // shell while every value below stays untouched.
       _SectionCard(
         title: 'Language',
         children: [
-          XtSelectRow<String>(
+          _target('language', XtSelectRow<String>(
             key: const ValueKey('setting-language'),
             label: 'Interface language',
             value: language?.code ?? 'en',
             options: const {'en': 'English', 'zh': '简体中文'},
             onChanged: (code) => language?.onChanged(code),
-          ),
+          )),
         ],
       ),
       _SectionCard(
         title: 'Terminal settings',
         children: [
-          XtSelectRow<String>(
+          _target('cursor', XtSelectRow<String>(
             label: 'Cursor style',
             value: switch (core.cursorStyle) {
               'bar' => 'Bar',
@@ -502,8 +734,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _ => 'block',
               },
             }),
-          ),
-          XtSelectRow<String>(
+          )),
+          _target('line-spacing', XtSelectRow<String>(
             label: 'Line spacing',
             value: switch (core.lineSpacing) {
               <= 0.92 => 'Compact',
@@ -522,26 +754,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _ => 1.0,
               },
             }),
-          ),
-          XtSwitchRow(
+          )),
+          _target('padding', XtSwitchRow(
             key: const ValueKey('setting-padding'),
             label: 'Inset terminal text',
             description: 'Keep a small margin around the character grid',
             value: core.padding,
             onChanged: (value) => _save({'padding': value}),
-          ),
-          XtSwitchRow(
+          )),
+          _target('bold', XtSwitchRow(
             key: const ValueKey('setting-bold'),
             label: 'Use a bold face for terminal text',
             value: core.bold,
             onChanged: (value) => _save({'bold': value}),
-          ),
+          )),
         ],
       ),
       _SectionCard(
         children: [
-          XtSelectRow<String>(
-            label: 'Font',
+          _target('terminal-font', XtSelectRow<String>(
+            label: 'Terminal font',
             value: fonts.terminalFamily.isEmpty
                 ? 'Default'
                 : _familyLabel(fonts.terminalFamily),
@@ -551,33 +783,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 value == 'Default' ? '' : _familyValue(value),
               );
             }),
-          ),
-          _StepperRow(
-            label: 'Text Size',
+          )),
+          const _SettingsText('Changes terminal characters and the grid, not interface labels.'),
+          _target('terminal-size', _StepperRow(
+            label: 'Terminal text size',
             keyPrefix: 'terminal',
             value: fonts.terminalSize,
             onChanged: fonts.setTerminalSize,
-            min: 10,
-            max: 28,
-          ),
+            min: 8,
+            max: 32,
+          )),
         ],
       ),
       _SectionCard(
-        title: 'Terminal theme',
+        title: 'Appearance',
         children: [
-          XtSelectRow<String>(
+          _target('theme', XtSelectRow<String>(
             label: 'Theme',
-            value: widget.lightTheme ? 'Light' : 'Dark',
-            options: const {'Dark': 'Dark', 'Light': 'Light'},
-            onChanged: (value) => widget.onThemeChanged(value == 'Light'),
-          ),
+            value: (appearance?.themeMode ??
+                (widget.lightTheme ? AppThemeMode.light : AppThemeMode.dark)).name,
+            options: {
+              // A system choice requires the shared settings adapter above us.
+              // Never fake follow-system by saving today's resolved bool.
+              if (appearance != null) 'system': 'Follow system',
+              'dark': 'Dark', 'light': 'Light',
+            },
+            onChanged: (value) {
+              final mode = AppThemeMode.values.byName(value);
+              if (appearance != null) {
+                appearance.onThemeChanged(mode);
+              } else {
+                widget.onThemeChanged(mode == AppThemeMode.light);
+              }
+            },
+          )),
         ],
       ),
       _SectionCard(
         title: 'Interface',
         children: [
-          XtSelectRow<String>(
-            label: 'Font',
+          _target('interface-font', XtSelectRow<String>(
+            label: 'Interface font',
             value: fonts.uiFamily.isEmpty
                 ? 'Default'
                 : _familyLabel(fonts.uiFamily),
@@ -585,22 +831,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (value) => setState(() {
               fonts.setUiFamily(value == 'Default' ? '' : _familyValue(value));
             }),
-          ),
-          _StepperRow(
-            label: 'Text Size',
+          )),
+          const _SettingsText('Changes menus and interface labels, not terminal characters.'),
+          _target('interface-size', _StepperRow(
+            label: 'Interface text size',
             keyPrefix: 'interface',
             value: fonts.uiSize,
             onChanged: fonts.setUiSize,
-            min: 11,
-            max: 22,
-          ),
-          _DestinationRow(
+            min: 8,
+            max: 32,
+          )),
+          _target('import-font', _DestinationRow(
             label: 'Import font (TTF/OTF)',
             onTap: () async {
               await fonts.importFont();
               if (mounted) setState(() {});
             },
-          ),
+          )),
           if (fonts.error != null)
             _SettingsText(
               fonts.error!,
@@ -619,21 +866,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _SectionCard(
       title: 'SFTP settings',
       children: [
-        XtSwitchRow(
+        _target('sftp-follow', XtSwitchRow(
           key: const ValueKey('setting-sftp-follow'),
           label: 'Follow the terminal directory',
           description:
               'Open the file browser at the shell\'s current folder when supported',
           value: _core.sftpFollowCd,
           onChanged: (value) => _save({'sftp_follow_cd': value}),
-        ),
-        _PathRow(
+        )),
+        _target('download-folder', _PathRow(
           label: 'Download folder',
           value: _core.downloadDir.isEmpty
               ? 'Ask for a folder each time'
               : _core.downloadDir,
           onChoose: _chooseDownloadFolder,
-        ),
+        )),
         if (_core.downloadDir.isNotEmpty)
           _DestinationRow(
             label: 'Clear download folder',
@@ -651,7 +898,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _SectionCard(
       title: 'Session logs',
       children: [
-        XtSwitchRow(
+        _target('session-logs', XtSwitchRow(
           key: const ValueKey('setting-session-logs'),
           label: 'Save session logs',
           description:
@@ -659,7 +906,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               'sessions are not recorded retroactively.',
           value: _core.sessionLogs,
           onChanged: (value) => _save({'session_logs': value}),
-        ),
+        )),
         const _SettingsText(
           'Transcripts are stored in the app data folder and appear in Logs, '
           'where they can be opened or deleted. Nothing is uploaded.',
@@ -669,16 +916,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _SectionCard(
       title: 'Profile data',
       children: [
-        _DestinationRow(
+        _target('profile-export', _DestinationRow(
           key: const ValueKey('settings-export'),
           label: 'Export sessions (JSON)',
           onTap: _dataBusy ? null : _exportProfile,
-        ),
-        _DestinationRow(
+        )),
+        _target('profile-import', _DestinationRow(
           key: const ValueKey('settings-import'),
           label: 'Import sessions (JSON)',
           onTap: _dataBusy ? null : _importProfile,
-        ),
+        )),
         if (_dataStatus != null)
           _SettingsText(
             _dataStatus!,
@@ -694,8 +941,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ),
   ];
 
-  List<Widget> _shortcutsTab() => const [
-    _SectionCard(
+  List<Widget> _shortcutsTab() => [
+    _target('shortcuts', _SectionCard(
       title: 'Keyboard shortcuts',
       children: [
         _ShortcutRow(
@@ -714,7 +961,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         _ShortcutRow(keys: 'Enter', action: 'Run the command'),
       ],
-    ),
+    )),
   ];
 
   // Font families are stored as family identifiers; show their display names.
@@ -1118,15 +1365,16 @@ class _AboutFeature extends StatelessWidget {
   }
 }
 
-/// One About link row: a real destination icon, label and copy affordance. The
-/// URL is the clipboard payload, not body copy — raw URLs wrap badly and add
-/// noise to a settings card.
+/// One About link row: open on click/Enter, with a separate copy affordance.
+/// The full destination is available as a tooltip and in the clipboard, rather
+/// than wrapping long URLs into every settings card.
 class _LinkRow extends StatelessWidget {
   final String label;
   final String url;
   final IconData icon;
   final bool copied;
   final VoidCallback onTap;
+  final VoidCallback onCopy;
 
   const _LinkRow({
     required this.label,
@@ -1134,12 +1382,28 @@ class _LinkRow extends StatelessWidget {
     required this.icon,
     required this.copied,
     required this.onTap,
+    required this.onCopy,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return XtHoverRow(
+    return Focus(
+      onKeyEvent: (_, event) {
+        if (event is KeyDownEvent &&
+            (event.logicalKey == LogicalKeyboardKey.enter ||
+             event.logicalKey == LogicalKeyboardKey.space)) {
+          onTap();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Semantics(
+        link: true,
+        child: Tooltip(
+          tooltip: (_) => Text(url),
+          child: XtHoverRow(
+      key: ValueKey('settings-link-$url'),
       onTap: onTap,
       height: 38,
       margin: const EdgeInsets.only(top: 2),
@@ -1169,14 +1433,18 @@ class _LinkRow extends StatelessWidget {
               ),
             ),
           const SizedBox(width: 6),
-          Icon(
-            copied ? LucideIcons.check : LucideIcons.copy,
-            size: 14,
-            color: copied
-                ? XtColors.accent(context)
-                : XtColors.textTertiary(context),
+          XtIconButton(
+            key: ValueKey('settings-copy-$url'),
+            icon: copied ? LucideIcons.check : LucideIcons.copy,
+            size: 30,
+            iconSize: 14,
+            tooltip: AppLanguage.tr(context, 'Copy link'),
+            onPressed: onCopy,
           ),
         ],
+      ),
+          ),
+        ),
       ),
     );
   }
