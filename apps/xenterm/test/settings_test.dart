@@ -96,7 +96,14 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Language'), findsOneWidget);
-      await tester.tap(find.text('Follow system'));
+      // Language and theme both default to Follow system. Target the
+      // language selector rather than an unrelated control with that label.
+      final languageValue = find.descendant(
+        of: find.byKey(const ValueKey('setting-language')),
+        matching: find.text('Follow system'),
+      );
+      expect(languageValue.hitTestable(), findsOneWidget);
+      await tester.tap(languageValue);
       await tester.pumpAndSettle();
       await tester.tap(
         find.descendant(

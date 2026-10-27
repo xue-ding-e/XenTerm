@@ -8,6 +8,7 @@ import 'package:xenterm_app/screens/settings/settings_screen.dart';
 import 'package:xenterm_app/theme/app_fonts.dart';
 import 'package:xenterm_app/terminal/core_settings.dart';
 import 'package:xenterm_app/theme/app_theme.dart';
+import 'package:xenterm_app/widgets/primitives.dart';
 
 Future<AppFonts> _mount(WidgetTester tester, {String locale = 'en'}) async {
   SharedPreferences.setMockInitialValues({});
@@ -54,8 +55,31 @@ void main() {
         await tester.tap(find.text(label));
         await tester.pumpAndSettle();
         final control = find.byKey(const ValueKey('setting-language'));
-        expect(control.hitTestable(), findsOneWidget);
+        expect(control, findsOneWidget);
+        // The row includes top padding; its center is not a click target.
+        // Verify the actual dropdown remains visible and opens after locating.
+        final selector = find.descendant(
+          of: control,
+          matching: find.byType(XtMenuAnchor),
+        );
+        expect(selector.hitTestable(), findsOneWidget);
+        final bounds = tester.getRect(selector);
+        expect(bounds.top, greaterThanOrEqualTo(80));
+        expect(bounds.bottom, lessThanOrEqualTo(600));
+        expect(bounds.left, greaterThanOrEqualTo(0));
+        expect(bounds.right, lessThanOrEqualTo(940));
         expect(FocusManager.instance.primaryFocus?.debugLabel, 'setting-language');
+        await tester.tap(selector);
+        await tester.pumpAndSettle();
+        expect(find.byType(XtMenuPopup), findsOneWidget);
+        expect(find.descendant(
+          of: find.byType(XtMenuPopup),
+          matching: find.text('简体中文'),
+        ).hitTestable(), findsOneWidget);
+        // Do not select a value: this test exercises navigation, not persistence.
+        await tester.tapAt(tester.getCenter(search));
+        await tester.pumpAndSettle();
+        expect(find.byType(XtMenuPopup), findsNothing);
         expect(tester.takeException(), isNull);
       });
     }

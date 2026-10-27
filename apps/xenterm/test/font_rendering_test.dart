@@ -82,13 +82,23 @@ void main() {
     await tester.pump(const Duration(milliseconds: 40));
     final beforeCols = session.cols;
     final beforeRows = session.rows;
+    expect(beforeCols, greaterThan(0));
+    expect(beforeRows, greaterThan(0));
     fonts.setTerminalSize(24);
     await tester.pump();
     final canvas = tester.widget<CustomPaint>(find.byKey(const ValueKey('terminal-canvas')));
     final painter = canvas.painter! as TerminalPainter;
     expect(painter.fontSize, 24);
+    // Painting changes this frame, but native reflow is deliberately deferred
+    // outside layout by the 60 ms trailing resize throttle.
+    expect(session.cols, beforeCols);
+    expect(session.rows, beforeRows);
+    await tester.pump(const Duration(milliseconds: 60));
     expect(session.cols, lessThan(beforeCols));
     expect(session.rows, lessThan(beforeRows));
+    final size = tester.getSize(find.byKey(const ValueKey('terminal-canvas')));
+    expect(session.cols, (size.width / painter.cellWidth).floor().clamp(2, 1000));
+    expect(session.rows, (size.height / painter.lineHeight).floor().clamp(2, 1000));
     expect(fonts.uiSize, 14);
     await tester.pumpWidget(const SizedBox.shrink());
   });
