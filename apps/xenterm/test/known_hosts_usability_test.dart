@@ -75,6 +75,9 @@ void main() {
       scrollable: find.descendant(of: list, matching: find.byType(Scrollable)),
       maxScrolls: 100,
     );
+    // The final ensureVisible jump can follow discovery in the sliver cache;
+    // lay out that scroll position before checking the action's hit target.
+    await tester.pumpAndSettle();
     expect(last.hitTestable(), findsOneWidget);
     await tester.tap(last);
     await tester.pump();
