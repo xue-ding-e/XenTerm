@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../terminal/core_settings.dart';
+import '../distribution.dart';
 
 class ImportedFont {
   final String name;
@@ -28,6 +29,14 @@ class ImportedFont {
 /// choices themselves are read/written through CoreSettingsController.
 /// TerminalView reads these values for its cell measurement and painting.
 class AppFonts extends ChangeNotifier {
+  final Future<Directory> Function() _supportDirectory;
+  AppFonts({Future<Directory> Function()? supportDirectory})
+      : _supportDirectory = supportDirectory ?? getApplicationSupportDirectory;
+
+  Future<File> _releaseAssetsFile() async => File(
+    '${(await _supportDirectory()).path}/xenterm-flutter-next/font-assets.json',
+  );
+
   static const _legacyKey = 'xenterm.fonts.v1';
   static const _assetsKey = 'xenterm.font-assets.v1';
   CoreSettingsController? _settings;
@@ -113,10 +122,18 @@ class AppFonts extends ChangeNotifier {
   );
 
   Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    // Do not rewrite the old preference blob: it remains available for the
-    // explicit migration preview. Only font registration metadata is reused.
-    final raw = prefs.getString(_assetsKey) ?? prefs.getString(_legacyKey);
+    // Independent releases never consult upstream preferences or font paths.
+    // The separate JSON file also avoids read/modify/write races in a shared
+    // SharedPreferences backing file when both applications run together.
+    final String? raw;
+    if (isolatedFlutterRelease) {
+      final file = await _releaseAssetsFile();
+      raw = await file.exists() ? await file.readAsString() : null;
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      // Keep old preferences intact for the explicit migration preview.
+      raw = prefs.getString(_assetsKey) ?? prefs.getString(_legacyKey);
+    }
     if (raw == null) return;
     try {
       final saved = jsonDecode(raw) as Map<String, dynamic>;
@@ -155,7 +172,7 @@ class AppFonts extends ChangeNotifier {
         throw const FormatException('仅支持 20 MB 以下的 TTF/OTF 字体');
       }
       final dir = Directory(
-        '${(await getApplicationSupportDirectory()).path}/fonts',
+        '${(await _supportDirectory()).path}/${isolatedFlutterRelease ? 'xenterm-flutter-next/fonts' : 'fonts'}',
       );
       await dir.create(recursive: true);
       final family = 'xenterm_${DateTime.now().microsecondsSinceEpoch}';
@@ -193,12 +210,16 @@ class AppFonts extends ChangeNotifier {
   }
 
   Future<void> _saveAssets() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _assetsKey,
-      jsonEncode({
-        'imported': imported.map((font) => font.toJson()).toList(),
-      }),
-    );
+    final value = jsonEncode({
+      'imported': imported.map((font) => font.toJson()).toList(),
+    });
+    if (isolatedFlutterRelease) {
+      final file = await _releaseAssetsFile();
+      await file.parent.create(recursive: true);
+      await file.writeAsString(value, flush: true);
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_assetsKey, value);
+    }
   }
 }

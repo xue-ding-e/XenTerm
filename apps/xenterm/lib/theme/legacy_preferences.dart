@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../distribution.dart';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Read-only migration preview. Raw key presence in an old core settings row
@@ -7,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// win. The user selects fields and the normal shared service validates them.
 /// Keep every source key intact, including after a successful explicit import.
 Future<Map<String, dynamic>> readLegacyAppearancePreferences() async {
+  if (isolatedFlutterRelease) return const <String, dynamic>{};
   final prefs = await SharedPreferences.getInstance();
   final values = <String, dynamic>{};
   final language = prefs.getString('xenterm.language');
