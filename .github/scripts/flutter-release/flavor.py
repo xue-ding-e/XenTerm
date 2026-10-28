@@ -48,7 +48,7 @@ replace('apps/xenterm/tool/package_windows_installer.ps1',
 # Rename only the distribution wrapper, not Flutter's generated build output.
 p = root / 'apps/xenterm/tool/package_desktop.sh'
 before = p.read_bytes()
-s = before.decode().replace('rm -rf XenTerm.app', 'rm -rf "XenTerm.app"')
+s = before.decode('utf-8').replace('\r\n', '\n').replace('rm -rf XenTerm.app', 'rm -rf "XenTerm.app"')
 s = s.replace('XenTerm.app', 'XenTerm Flutter Next.app')
 s = s.replace('  local stage="$1"', '  local stage="$1"\n  cp LICENSE "$stage/"')
 s = s.replace('    # Re-sign the whole bundle', '    copy_extras "XenTerm Flutter Next.app/Contents/Resources"\n    # Re-sign the whole bundle')

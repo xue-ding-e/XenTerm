@@ -37,6 +37,11 @@ jobs:
         shell: bash
         working-directory: source
     steps:
+      - name: Preserve repository LF scripts on Windows checkout
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        timeout-minutes: 1
+        run: git config --global core.autocrlf false
       - name: Check out reviewed control
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         timeout-minutes: 5

@@ -106,7 +106,7 @@ build = {"source_sha": sha, "control_sha": os.environ['GITHUB_SHA'],
          "isolated_flutter_release": True, "official_release": False,
          "native_startup_smoke": True, "native_ui_verified": False, "asset": asset.name, "sha256": digest,
          "signing": "ad-hoc, not notarized" if platform_name == 'macos' else "unsigned",
-         "flavor": json.loads((evidence / 'flavor.json').read_text())}
-(evidence / ('BUILD-' + platform_name + '-' + platform.machine() + '.json')).write_text(json.dumps(build, indent=2)+'\n')
-(evidence / ('SHA256SUMS-' + platform_name + '-' + platform.machine())).write_text(digest + '  ' + asset.name + '\n')
+         "flavor": json.loads((evidence / 'flavor.json').read_text(encoding='utf-8'))}
+(evidence / ('BUILD-' + platform_name + '-' + platform.machine() + '.json')).write_text(json.dumps(build, indent=2)+'\n', encoding='utf-8', newline='\n')
+(evidence / ('SHA256SUMS-' + platform_name + '-' + platform.machine())).write_text(digest + '  ' + asset.name + '\n', encoding='utf-8', newline='\n')
 print(json.dumps(build, indent=2))

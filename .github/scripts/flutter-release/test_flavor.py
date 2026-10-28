@@ -20,7 +20,8 @@ with tempfile.TemporaryDirectory() as temp:
     for name in paths:
         dest = root / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes((source / name).read_bytes())
+        data = (source / name).read_bytes().replace(b'\r\n', b'\n')
+        dest.write_bytes(data.replace(b'\n', b'\r\n'))
     with patch.object(Path, 'write_text', windows_write), patch.object(sys, 'argv', ['flavor', str(root), str(root/'evidence')]):
         runpy.run_path(str(Path(__file__).with_name('flavor.py')), run_name='__main__')
     data = (root/'apps/xenterm/tool/package_desktop.sh').read_bytes()
