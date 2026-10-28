@@ -1,5 +1,6 @@
 import 'package:xenterm_app/bridge/native_bridge.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:xenterm_app/shell/window_activity.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
@@ -14,11 +15,12 @@ class _RecordingSession implements TerminalSession {
   final phases = <SchedulerPhase>[];
   int closes = 0;
   int versionValue = 1;
+  int versionReads = 0;
   bool disconnected = false;
   bool acceptsResize = true;
 
   @override
-  int get version => versionValue;
+  int get version { versionReads++; return versionValue; }
 
   @override
   Map<String, dynamic> snapshot() => {
@@ -150,6 +152,29 @@ void main() {
     expect(session.sizes.length, inInclusiveRange(3, 5));
     await tester.pump(const Duration(milliseconds: 61));
     expect(session.sizes.last, fixture.expectedSize(tester));
+    expect(session.phases, everyElement(SchedulerPhase.idle));
+    await finish(tester);
+  });
+
+  testWidgets('window animation pauses polling without starving final PTY size', (tester) async {
+    windowActivity.wake();
+    addTearDown(windowActivity.wake);
+    final session = _RecordingSession();
+    final fixture = _Fixture(() => session);
+    await prepare(tester, fixture);
+    windowActivity.resize();
+    final reads = session.versionReads;
+    for (final width in [1100.0, 1200.0, 1400.0]) {
+      fixture.width = width;
+      await fixture.pump(tester);
+      await tester.pump(const Duration(milliseconds: 65));
+      windowActivity.resize();
+    }
+    expect(session.versionReads, reads, reason: 'polling stays paused during animation');
+    expect(session.sizes.last, fixture.expectedSize(tester));
+    await tester.pump(WindowActivity.settleDelay + const Duration(milliseconds: 1));
+    await tester.pump();
+    expect(session.versionReads, greaterThan(reads), reason: 'settling resumes polling');
     expect(session.phases, everyElement(SchedulerPhase.idle));
     await finish(tester);
   });

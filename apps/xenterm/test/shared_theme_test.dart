@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:xenterm_app/main.dart';
@@ -35,6 +36,31 @@ void main() {
     expect(_brightness(tester), Brightness.dark);
     expect(fixture.values['theme_pref'], 'system');
     expect(fixture.calls, isEmpty);
+  });
+
+  testWidgets('shared theme updates the opaque native surface without legacy writes', (tester) async {
+    const channel = MethodChannel('window_manager');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'setBackgroundColor') calls.add(call);
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, null));
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    final fixture = SettingsFixture();
+    await _mount(tester, fixture);
+    expect(calls, hasLength(1));
+    final lightArguments = calls.single.arguments;
+    tester.widget<AppAppearance>(find.byType(AppAppearance)).onThemeChanged(AppThemeMode.dark);
+    await tester.pumpAndSettle();
+    expect(_brightness(tester), Brightness.dark);
+    expect(calls, hasLength(2));
+    expect(calls.last.arguments, isNot(equals(lightArguments)));
+    await tester.pumpAndSettle();
+    expect(calls, hasLength(2), reason: 'unchanged surfaces do not repeat platform writes');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.containsKey('xenterm.theme.light'), isFalse);
   });
 
   testWidgets('manual theme wins, survives restart and can return to system', (tester) async {
