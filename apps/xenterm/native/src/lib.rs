@@ -29,13 +29,24 @@ static STORE: OnceLock<Result<Mutex<xenterm::config::ConfigStore>, String>> = On
 /// a no-op and the portable-first default keeps applying, so a normal desktop
 /// install is unchanged; the pin only matters when the caller deliberately
 /// points the process at an isolated profile (tests, automation, seeded runs).
+// Independent release builds opt into a stable pinned profile even without an
+// environment override; launching the binary directly is isolated as well.
 static PROFILE: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Non-secret build identity for release bundle verification. This does not
+/// initialize a store or inspect any user profile.
+#[no_mangle]
+pub extern "C" fn xenterm_isolated_flutter_release() -> bool {
+    cfg!(feature = "isolated-flutter-release")
+}
 
 fn profile() -> Result<(), String> {
     match PROFILE.get_or_init(|| {
-        xenterm::config::configure_profile_from_env()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        #[cfg(feature = "isolated-flutter-release")]
+        let configured = xenterm::config::configure_profile_from_env_or_application("XenTermFlutterNext");
+        #[cfg(not(feature = "isolated-flutter-release"))]
+        let configured = xenterm::config::configure_profile_from_env();
+        configured.map(|_| ()).map_err(|e| e.to_string())
     }) {
         Ok(()) => Ok(()),
         Err(error) => Err(error.clone()),

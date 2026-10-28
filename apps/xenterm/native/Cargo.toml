@@ -7,6 +7,11 @@ description = "The Flutter frontend's FFI bridge onto the xenterm service core (
 [lib]
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Only the independent Flutter distribution enables this; upstream/default
+# builds retain the original portable profile behavior.
+isolated-flutter-release = []
+
 [dependencies]
 # The service core, and nothing else. This crate is a translation layer: it
 # maps the core's models onto C-ABI/JSON DTOs, and the core keeps zero

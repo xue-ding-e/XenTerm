@@ -59,6 +59,32 @@ pub fn configure_profile_from_env() -> Result<bool> {
     configure_profile(&mut args)
 }
 
+/// Opt-in distribution identity for embedders. A named default is pinned just
+/// like an explicit profile: it never imports legacy data or shares a keyring.
+/// Existing files in this application's own profile remain reusable. An
+/// explicit XENTERM_DATA_DIR keeps its existing admission semantics and wins.
+pub fn configure_profile_from_env_or_application(application: &str) -> Result<bool> {
+    if DATA_DIR.get().is_some() || PINNED_DATA_DIR.get().is_some() {
+        return Ok(false);
+    }
+    if std::env::var_os("XENTERM_DATA_DIR").is_some() {
+        return configure_profile_from_env();
+    }
+    let path = isolated_application_directory(application)?;
+    let path = path.to_str().context("application profile path is not UTF-8")?;
+    let mut args = vec!["xenterm-bridge".to_owned(), "--data-dir".to_owned(), path.to_owned()];
+    configure_profile(&mut args)
+}
+
+fn isolated_application_directory(application: &str) -> Result<PathBuf> {
+    if application.is_empty() || !application.bytes().all(|c| c.is_ascii_alphanumeric()) {
+        bail!("isolated application identity must be non-empty ASCII alphanumeric");
+    }
+    directories::ProjectDirs::from("dev", "xenterm", application)
+        .map(|dirs| dirs.config_dir().to_path_buf())
+        .context("cannot resolve the isolated application profile directory")
+}
+
 /// Inspect only these commands' local option positions. A filename, remote
 /// command, or option after `--` must never switch startup into preview mode.
 fn migration_preview(command: &[String]) -> bool {
@@ -164,6 +190,16 @@ mod tests {
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
+    #[test]
+    fn application_identity_is_stable_and_separate_from_the_default() {
+        let own = isolated_application_directory("XenTermFlutterNext").unwrap();
+        assert_eq!(own, isolated_application_directory("XenTermFlutterNext").unwrap());
+        assert_ne!(own, isolated_application_directory("XenTerm").unwrap());
+        for invalid in ["", "../XenTerm", "XenTerm/Next", "XenTerm\\Next"] {
+            assert!(isolated_application_directory(invalid).is_err());
+        }
+    }
+
     #[test]
     fn explicit_directory_precedes_environment_and_preserves_command_arguments() {
         let a = args(&[
