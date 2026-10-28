@@ -26,6 +26,25 @@ replace('apps/xenterm/windows/runner/Runner.rc',
         'VALUE "CompanyName", "dev.xenterm"', 'VALUE "CompanyName", "dev.xuedinge"')
 replace('apps/xenterm/windows/runner/Runner.rc',
         'VALUE "ProductName", "XenTerm"', 'VALUE "ProductName", "XenTerm Flutter Next"')
+# A separate MSI family must never major-upgrade or close the upstream app.
+import re
+wxs = 'packaging/windows/main.wxs'
+replace(wxs, '6E8F2A1B-3C4D-4E5F-9A0B-1C2D3E4F5A6B', '83238181-7F80-480F-9D10-82FF0FCD16F5')
+replace(wxs, '7F1C4E7A-2D6B-4A8E-9C33-5B1D0A6F2E81', '59D4AB58-F7CD-482D-A905-A81E6F8F3A21')
+replace(wxs, 'B4D7E2C9-8A31-4F6E-9B52-6C0A1E3D8F47', '28966D78-755F-40ED-A06C-DBB415EC006A')
+file = root / wxs
+text = file.read_text()
+text, removed = re.subn(r'        <util:CloseApplication\b.*?</util:CloseApplication>',
+    '<!-- No executable-name-wide close action: other distributions may be running. -->', text, flags=re.S)
+assert removed == 1
+text = text.replace('Name="XenTerm"', 'Name="XenTerm Flutter Next"')
+text = text.replace('Title="XenTerm"', 'Title="XenTerm Flutter Next"')
+text = text.replace('Manufacturer="xenterm contributors"', 'Manufacturer="xue-ding-e"')
+text = text.replace('Software\\XenTerm', 'Software\\XenTermFlutterNext')
+file.write_text(text)
+changes[wxs]['after_sha256'] = hashlib.sha256(file.read_bytes()).hexdigest()
+replace('apps/xenterm/tool/package_windows_installer.ps1',
+        '@("README.md", "README.zh.md",', '@("LICENSE", "README.md", "README.zh.md",')
 # Rename only the distribution wrapper, not Flutter's generated build output.
 p = root / 'apps/xenterm/tool/package_desktop.sh'
 before = p.read_bytes()

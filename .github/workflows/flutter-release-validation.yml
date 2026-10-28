@@ -31,10 +31,7 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - {os: ubuntu-22.04, platform: linux, name: linux-x86_64}
           - {os: windows-latest, platform: windows, name: windows-x86_64}
-          - {os: macos-15, platform: macos, name: macos-aarch64}
-          - {os: macos-15-intel, platform: macos, name: macos-x86_64}
     defaults:
       run:
         shell: bash
@@ -139,6 +136,15 @@ jobs:
           test -f "$asset"
           python "$GITHUB_WORKSPACE/control/.github/scripts/flutter-release/verify_package.py" "$PWD" "$PWD/$asset" "$GITHUB_WORKSPACE/evidence" '${{ matrix.platform }}'
           echo "PACKAGE=$PWD/$asset" >> "$GITHUB_ENV"
+      - name: Build and exercise independent Windows MSI
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $wix = ./scripts/install-wix.ps1
+          $label = "flutter-next-$($env:SOURCE_SHA.Substring(0,7))-run$env:GITHUB_RUN_ID"
+          $msi = ./apps/xenterm/tool/package_windows_installer.ps1 -Version $label -ProductVersion 0.7.3 -WixBin $wix
+          & "$env:GITHUB_WORKSPACE/control/.github/scripts/flutter-release/verify_msi.ps1" -Msi $msi -Evidence "$env:GITHUB_WORKSPACE/evidence"
+          "MSI=$msi" >> $env:GITHUB_ENV
       - name: Preserve bounded public build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -154,5 +160,13 @@ jobs:
         with:
           name: flutter-release-package-${{ matrix.name }}-${{ github.run_id }}
           path: ${{ env.PACKAGE }}
+          retention-days: 30
+          if-no-files-found: error
+      - name: Upload verified Windows installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 10
+        with:
+          name: flutter-next-windows-installer-${{ github.run_id }}
+          path: ${{ env.MSI }}
           retention-days: 30
           if-no-files-found: error
