@@ -112,6 +112,7 @@ jobs:
         timeout-minutes: 5
         run: |
           set -euo pipefail
+          python "$GITHUB_WORKSPACE/control/.github/scripts/flutter-release/test_flavor.py"
           python "$GITHUB_WORKSPACE/control/.github/scripts/flutter-release/flavor.py" "$PWD" "$GITHUB_WORKSPACE/evidence"
           bash -n apps/xenterm/tool/package_desktop.sh
           export XT_VERSION="$(GITHUB_SHA="$SOURCE_SHA" GITHUB_REF_TYPE=branch GITHUB_REF_NAME=release/flutter-20261028 XT_CHANNEL=beta bash scripts/version.sh)"

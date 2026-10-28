@@ -33,7 +33,7 @@ replace(wxs, '6E8F2A1B-3C4D-4E5F-9A0B-1C2D3E4F5A6B', '83238181-7F80-480F-9D10-82
 replace(wxs, '7F1C4E7A-2D6B-4A8E-9C33-5B1D0A6F2E81', '59D4AB58-F7CD-482D-A905-A81E6F8F3A21')
 replace(wxs, 'B4D7E2C9-8A31-4F6E-9B52-6C0A1E3D8F47', '28966D78-755F-40ED-A06C-DBB415EC006A')
 file = root / wxs
-text = file.read_text()
+text = file.read_bytes().decode('utf-8')
 text, removed = re.subn(r'        <util:CloseApplication\b.*?</util:CloseApplication>',
     '<!-- No executable-name-wide close action: other distributions may be running. -->', text, flags=re.S)
 assert removed == 1
@@ -41,7 +41,7 @@ text = text.replace('Name="XenTerm"', 'Name="XenTerm Flutter Next"')
 text = text.replace('Title="XenTerm"', 'Title="XenTerm Flutter Next"')
 text = text.replace('Manufacturer="xenterm contributors"', 'Manufacturer="xue-ding-e"')
 text = text.replace('Software\\XenTerm', 'Software\\XenTermFlutterNext')
-file.write_text(text)
+file.write_bytes(text.encode('utf-8'))
 changes[wxs]['after_sha256'] = hashlib.sha256(file.read_bytes()).hexdigest()
 replace('apps/xenterm/tool/package_windows_installer.ps1',
         '@("README.md", "README.zh.md",', '@("LICENSE", "README.md", "README.zh.md",')
@@ -52,7 +52,7 @@ s = before.decode().replace('rm -rf XenTerm.app', 'rm -rf "XenTerm.app"')
 s = s.replace('XenTerm.app', 'XenTerm Flutter Next.app')
 s = s.replace('  local stage="$1"', '  local stage="$1"\n  cp LICENSE "$stage/"')
 s = s.replace('    # Re-sign the whole bundle', '    copy_extras "XenTerm Flutter Next.app/Contents/Resources"\n    # Re-sign the whole bundle')
-p.write_text(s)
+p.write_bytes(s.encode('utf-8'))
 changes['apps/xenterm/tool/package_desktop.sh'] = {
     "before_sha256": hashlib.sha256(before).hexdigest(), "after_sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
 evidence.mkdir(parents=True, exist_ok=True)
@@ -63,4 +63,4 @@ evidence.mkdir(parents=True, exist_ok=True)
     "linux_application_id": "dev.xuedinge.xenterm_flutter_next",
     "windows_company": "dev.xuedinge", "windows_product": "XenTerm Flutter Next",
     "rust_profile_application": "XenTermFlutterNext", "implicit_migration": False,
-}, indent=2) + '\n')
+}, indent=2) + '\n', encoding='utf-8', newline='\n')
