@@ -1,0 +1,158 @@
+name: Independent Flutter release candidate
+
+on:
+  push:
+    branches: [validation/flutter-release-20261028]
+    paths:
+      - .github/workflows/flutter-release-validation.yml
+      - .github/scripts/flutter-release/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: independent-flutter-release
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ae608aa89f14491ad4f4f2533daa8b9f365d5c11
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  XENTERM_LIVE_PORT: ''
+  XENTERM_LIVE_DATA: ''
+
+jobs:
+  build:
+    if: github.repository == 'xue-ding-e/XenTerm' && github.ref == 'refs/heads/validation/flutter-release-20261028'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - {os: ubuntu-22.04, platform: linux, name: linux-x86_64}
+          - {os: windows-latest, platform: windows, name: windows-x86_64}
+          - {os: macos-15, platform: macos, name: macos-aarch64}
+          - {os: macos-15-intel, platform: macos, name: macos-x86_64}
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Check out reviewed control
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          path: control
+          persist-credentials: false
+      - name: Check out fixed product commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          repository: xue-ding-e/XenTerm
+          ref: ae608aa89f14491ad4f4f2533daa8b9f365d5c11
+          path: source
+          persist-credentials: false
+      - name: Verify source and isolate all test profiles
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(find .github/workflows -name '*.yml' -print 2>/dev/null)"
+          mkdir -p "$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$RUNNER_TEMP/flutter-test-profile"
+          echo "XENTERM_DATA_DIR=$RUNNER_TEMP/flutter-test-profile" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo 'XT_BASH=C:\Program Files\Git\bin\bash.exe' >> "$GITHUB_ENV"
+          fi
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        timeout-minutes: 10
+        with:
+          toolchain: 1.99.1
+      - name: Cache compilation only
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        timeout-minutes: 5
+        with:
+          workspaces: source -> target
+          shared-key: flutter-release-${{ matrix.name }}
+          cache-on-failure: true
+      - name: Install pinned Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        timeout-minutes: 15
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+      - name: Install minimal Linux desktop dependencies with bounded networking
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
+            build-essential pkg-config cmake ninja-build clang libgtk-3-dev liblzma-dev libstdc++-12-dev libudev-dev libdbus-1-dev xvfb xauth dbus-x11
+      - name: Analyze and test ordinary source and isolated Flutter flavor
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          cd apps/xenterm
+          flutter pub get --enforce-lockfile
+          flutter analyze
+          flutter test --reporter expanded
+          flutter test --dart-define=XENTERM_FLUTTER_NEXT=true test/release_flavor_test.dart test/shared_theme_test.dart --reporter expanded
+          git diff --exit-code -- pubspec.yaml pubspec.lock
+      - name: Verify core and profile admission in both bridge feature modes
+        if: runner.os == 'Linux'
+        timeout-minutes: 55
+        run: |
+          set -euo pipefail
+          cargo test --locked --jobs 2 -p xenterm --no-default-features --features headless -- --test-threads=1
+          cargo test --locked --jobs 2 -p xenterm-bridge -- --test-threads=1
+          cargo test --locked --jobs 2 -p xenterm-bridge --features isolated-flutter-release --test release_profile -- --test-threads=1
+      - name: Apply explicit distribution identity and record transformations
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python "$GITHUB_WORKSPACE/control/.github/scripts/flutter-release/flavor.py" "$PWD" "$GITHUB_WORKSPACE/evidence"
+          bash -n apps/xenterm/tool/package_desktop.sh
+          export XT_VERSION="$(GITHUB_SHA="$SOURCE_SHA" GITHUB_REF_TYPE=branch GITHUB_REF_NAME=release/flutter-20261028 XT_CHANNEL=beta bash scripts/version.sh)"
+          echo "XT_VERSION=$XT_VERSION" >> "$GITHUB_ENV"
+          git diff --binary > "$GITHUB_WORKSPACE/evidence/build-flavor.patch"
+      - name: Build bridge with mandatory independent profile feature
+        timeout-minutes: 45
+        run: GITHUB_SHA="$SOURCE_SHA" cargo build --release --locked --jobs 2 -p xenterm-bridge --features isolated-flutter-release
+      - name: Build Flutter independent desktop flavor
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          cd apps/xenterm
+          flutter build ${{ matrix.platform }} --release --dart-define=XENTERM_FLUTTER_NEXT=true
+      - name: Bundle, package and verify exact bridge bytes and build identity
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          bash apps/xenterm/tool/bundle_native.sh
+          label="flutter-next-${SOURCE_SHA:0:7}-run${GITHUB_RUN_ID}"
+          asset="$(bash apps/xenterm/tool/package_desktop.sh "$label" | tail -n 1)"
+          test -f "$asset"
+          python "$GITHUB_WORKSPACE/control/.github/scripts/flutter-release/verify_package.py" "$PWD" "$PWD/$asset" "$GITHUB_WORKSPACE/evidence" '${{ matrix.platform }}'
+          echo "PACKAGE=$PWD/$asset" >> "$GITHUB_ENV"
+      - name: Preserve bounded public build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 5
+        with:
+          name: flutter-release-evidence-${{ matrix.name }}-${{ github.run_id }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: error
+      - name: Upload verified independent portable package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 10
+        with:
+          name: flutter-release-package-${{ matrix.name }}-${{ github.run_id }}
+          path: ${{ env.PACKAGE }}
+          retention-days: 30
+          if-no-files-found: error
