@@ -77,19 +77,19 @@ with tempfile.TemporaryDirectory(prefix='xt-release-smoke-') as profile_dir:
         time.sleep(8)
         assert process.poll() is None, 'desktop app exited before startup smoke completed'
     finally:
-        def stop(sig):
+        def stop(force=False):
             try:
                 if os.name == 'nt':
-                    process.terminate() if sig == signal.SIGTERM else process.kill()
+                    process.kill() if force else process.terminate()
                 else:
-                    os.killpg(process.pid, sig)
+                    os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
             except ProcessLookupError:
                 pass
-        stop(signal.SIGTERM)
+        stop()
         try:
             output = process.communicate(timeout=10)[0]
         except subprocess.TimeoutExpired:
-            stop(signal.SIGKILL)
+            stop(force=True)
             output = process.communicate(timeout=10)[0]
         (evidence / ('startup-' + platform_name + '.log')).write_bytes(output[-65536:])
 digest = hashlib.sha256(asset.read_bytes()).hexdigest()
