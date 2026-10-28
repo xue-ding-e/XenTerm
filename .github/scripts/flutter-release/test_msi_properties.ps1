@@ -39,5 +39,11 @@ try {
     [Runtime.InteropServices.Marshal]::FinalReleaseComObject($db) | Out-Null
     [Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer) | Out-Null
 } finally {
+    # COM view/record readers release their references; drain RCW finalizers
+    # before removing the synthetic MSI on Windows.
+    $db = $null
+    $installer = $null
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
     Remove-Item -LiteralPath $work -Recurse -Force
 }

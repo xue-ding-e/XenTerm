@@ -68,6 +68,13 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             echo 'XT_BASH=C:\Program Files\Git\bin\bash.exe' >> "$GITHUB_ENV"
           fi
+      - name: Validate MSI property reader before compilation
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $wix = ./scripts/install-wix.ps1
+          "WIX_BIN=$wix" >> $env:GITHUB_ENV
+          & "$env:GITHUB_WORKSPACE/control/.github/scripts/flutter-release/test_msi_properties.ps1" -WixBin $wix
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         timeout-minutes: 10
@@ -123,13 +130,6 @@ jobs:
           export XT_VERSION="$(GITHUB_SHA="$SOURCE_SHA" GITHUB_REF_TYPE=branch GITHUB_REF_NAME=release/flutter-20261028 XT_CHANNEL=beta bash scripts/version.sh)"
           echo "XT_VERSION=$XT_VERSION" >> "$GITHUB_ENV"
           git diff --binary > "$GITHUB_WORKSPACE/evidence/build-flavor.patch"
-      - name: Validate MSI property reader before compilation
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          $wix = ./scripts/install-wix.ps1
-          "WIX_BIN=$wix" >> $env:GITHUB_ENV
-          & "$env:GITHUB_WORKSPACE/control/.github/scripts/flutter-release/test_msi_properties.ps1" -WixBin $wix
       - name: Build bridge with mandatory independent profile feature
         timeout-minutes: 45
         run: GITHUB_SHA="$SOURCE_SHA" cargo build --release --locked --jobs 2 -p xenterm-bridge --features isolated-flutter-release
