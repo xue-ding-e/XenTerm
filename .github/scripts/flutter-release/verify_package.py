@@ -20,6 +20,13 @@ assert len(sha) == 40 and all(c in '0123456789abcdef' for c in sha)
 if platform_name == 'windows':
     bridge = root / 'apps/xenterm/build/windows/x64/runner/Release/xenterm_bridge.dll'
     executable = bridge.parent / 'xenterm.exe'
+    identity_env = dict(os.environ, XT_PACKAGE_EXE=str(executable.resolve()))
+    identity = json.loads(subprocess.check_output([
+        'powershell', '-NoProfile', '-Command',
+        '$v=(Get-Item -LiteralPath $env:XT_PACKAGE_EXE).VersionInfo; '
+        '@{CompanyName=$v.CompanyName;ProductName=$v.ProductName}|ConvertTo-Json -Compress',
+    ], env=identity_env, timeout=30).decode('utf-8-sig'))
+    assert identity == {'CompanyName': 'dev.xuedinge', 'ProductName': 'XenTerm Flutter Next'}, identity
 elif platform_name == 'macos':
     bridge = root / 'XenTerm Flutter Next.app/Contents/Frameworks/libxenterm_bridge.dylib'
     executable = bridge.parents[1] / 'MacOS/xenterm_app'
