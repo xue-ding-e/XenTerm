@@ -4,9 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:xenterm_app/bridge/native_bridge.dart';
 
 void main() {
-  final sep = Platform.pathSeparator;
-  String tempPath(List<String> parts) =>
-      [Directory.systemTemp.path, ...parts].join(sep);
+  // Simulated macOS/Linux paths must not depend on the host running the test.
+  String tempPath(List<String> parts) => ['/tmp', ...parts].join('/');
 
   test('bridge primary path matches the released desktop bundle', () {
     final name = Platform.isWindows
@@ -429,7 +428,7 @@ void main() {
   });
 
   test('Windows only looks next to the executable', () {
-    final executable = tempPath(['release', 'xenterm.exe']);
+    const executable = r'C:\release\xenterm.exe';
     final paths = NativeBridge.librarySearchPaths(
       executable,
       'xenterm_bridge.dll',
@@ -437,7 +436,7 @@ void main() {
       isLinux: false,
     );
 
-    expect(paths, [tempPath(['release', 'xenterm_bridge.dll'])]);
+    expect(paths, [r'C:\release\xenterm_bridge.dll']);
   });
 }
 
