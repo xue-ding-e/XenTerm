@@ -6,19 +6,12 @@ $Msi = (Resolve-Path -LiteralPath $Msi).Path
 $Evidence = (Resolve-Path -LiteralPath $Evidence).Path
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $db = $installer.OpenDatabase($Msi, 0)
-function Get-Property([string]$Name) {
-    $view = $db.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$Name'")
-    $view.Execute()
-    $row = $view.Fetch()
-    if (-not $row) { throw "Missing MSI property $Name" }
-    $value = $row.StringData(1)
-    $view.Close()
-    return $value
-}
-$name = Get-Property 'ProductName'
-$upgrade = Get-Property 'UpgradeCode'
-$product = Get-Property 'ProductCode'
-$version = Get-Property 'ProductVersion'
+. "$PSScriptRoot/msi_properties.ps1"
+$name = Get-MsiProperty $db 'ProductName'
+$upgrade = Get-MsiProperty $db 'UpgradeCode'
+$product = Get-MsiProperty $db 'ProductCode'
+$version = Get-MsiProperty $db 'ProductVersion'
+@{product_name=$name;upgrade_code=$upgrade;product_code=$product;version=$version;version_type=$version.GetType().FullName;product_type=$product.GetType().FullName} | ConvertTo-Json | Set-Content (Join-Path $Evidence 'MSI-PROPERTIES.json')
 if ($version -ne '0.7.3' -or $product -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { throw 'Unexpected MSI version or ProductCode' }
 if ($name -ne 'XenTerm Flutter Next' -or $upgrade -ne '{83238181-7F80-480F-9D10-82FF0FCD16F5}') { throw 'Wrong MSI identity' }
 [Runtime.InteropServices.Marshal]::FinalReleaseComObject($db) | Out-Null

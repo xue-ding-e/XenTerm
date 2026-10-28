@@ -123,6 +123,13 @@ jobs:
           export XT_VERSION="$(GITHUB_SHA="$SOURCE_SHA" GITHUB_REF_TYPE=branch GITHUB_REF_NAME=release/flutter-20261028 XT_CHANNEL=beta bash scripts/version.sh)"
           echo "XT_VERSION=$XT_VERSION" >> "$GITHUB_ENV"
           git diff --binary > "$GITHUB_WORKSPACE/evidence/build-flavor.patch"
+      - name: Validate MSI property reader before compilation
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $wix = ./scripts/install-wix.ps1
+          "WIX_BIN=$wix" >> $env:GITHUB_ENV
+          & "$env:GITHUB_WORKSPACE/control/.github/scripts/flutter-release/test_msi_properties.ps1" -WixBin $wix
       - name: Build bridge with mandatory independent profile feature
         timeout-minutes: 45
         run: GITHUB_SHA="$SOURCE_SHA" cargo build --release --locked --jobs 2 -p xenterm-bridge --features isolated-flutter-release
@@ -141,12 +148,28 @@ jobs:
           asset="$(bash apps/xenterm/tool/package_desktop.sh "$label" | tail -n 1)"
           test -f "$asset"
           python "$GITHUB_WORKSPACE/control/.github/scripts/flutter-release/verify_package.py" "$PWD" "$PWD/$asset" "$GITHUB_WORKSPACE/evidence" '${{ matrix.platform }}'
-          echo "PACKAGE=$PWD/$asset" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "PACKAGE=$(cygpath -w "$PWD/$asset")" >> "$GITHUB_ENV"
+          else
+            echo "PACKAGE=$PWD/$asset" >> "$GITHUB_ENV"
+          fi
+      - name: Upload verified independent portable package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 10
+        with:
+          name: flutter-release-package-${{ matrix.name }}-${{ github.run_id }}
+          path: |
+            ${{ env.PACKAGE }}
+            evidence/BUILD-windows-*.json
+            evidence/SHA256SUMS-windows-*
+            evidence/flavor.json
+          retention-days: 30
+          if-no-files-found: error
       - name: Build and exercise independent Windows MSI
         timeout-minutes: 20
         shell: pwsh
         run: |
-          $wix = ./scripts/install-wix.ps1
+          $wix = $env:WIX_BIN
           $label = "flutter-next-$($env:SOURCE_SHA.Substring(0,7))-run$env:GITHUB_RUN_ID"
           $msi = ./apps/xenterm/tool/package_windows_installer.ps1 -Version $label -ProductVersion 0.7.3 -WixBin $wix
           & "$env:GITHUB_WORKSPACE/control/.github/scripts/flutter-release/verify_msi.ps1" -Msi $msi -Evidence "$env:GITHUB_WORKSPACE/evidence"
@@ -158,14 +181,6 @@ jobs:
         with:
           name: flutter-release-evidence-${{ matrix.name }}-${{ github.run_id }}
           path: evidence/
-          retention-days: 30
-          if-no-files-found: error
-      - name: Upload verified independent portable package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        timeout-minutes: 10
-        with:
-          name: flutter-release-package-${{ matrix.name }}-${{ github.run_id }}
-          path: ${{ env.PACKAGE }}
           retention-days: 30
           if-no-files-found: error
       - name: Upload verified Windows installer
