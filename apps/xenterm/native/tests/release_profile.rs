@@ -27,7 +27,8 @@ fn release_profile_child() {
     if mode == "restart" {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["id"], "owned-release-session");
+        assert_eq!(rows[0]["id"], std::fs::read_to_string(root.join("saved-id")).unwrap());
+        assert_eq!(rows[0]["label"], "owned-release-session");
     } else {
         assert_eq!(text, "[]", "synthetic legacy data must not be imported");
     }
@@ -37,7 +38,9 @@ fn release_profile_child() {
         assert!(!saved.is_null());
         let result = unsafe { CStr::from_ptr(saved) }.to_string_lossy().into_owned();
         xenterm_bridge::xenterm_string_free(saved);
-        assert!(result.contains("\"ok\":true"), "synthetic session save failed: {result}");
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["ok"], true);
+        std::fs::write(root.join("saved-id"), result["id"].as_str().unwrap()).unwrap();
     }
     assert!(xenterm::config::has_explicit_data_dir());
     let expected = if mode == "explicit" {
