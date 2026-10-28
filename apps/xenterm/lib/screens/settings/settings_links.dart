@@ -12,7 +12,7 @@ class SettingsLink {
 const projectLinks = <SettingsLink>[
   SettingsLink('Source code', 'https://github.com/ixbaicn/XenTerm'),
   SettingsLink('Issue tracker', 'https://github.com/ixbaicn/XenTerm/issues'),
-  SettingsLink('Releases', 'https://github.com/ixbaicn/XenTerm/releases'),
+  SettingsLink('Releases', 'https://github.com/xue-ding-e/XenTerm/releases'),
   SettingsLink('License', 'https://github.com/ixbaicn/XenTerm/blob/main/LICENSE'),
 ];
 
